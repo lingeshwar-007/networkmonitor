@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GuardSpot — Connect</title>
+<style>
+  :root {
+    --bg: #0b0f1a; --panel: #121729; --line: #232a3f; --ink: #e2e8f0;
+    --muted: #7b8496; --teal: #2dd4bf; --purple: #a78bfa; --red: #f0576a;
+    --font-ui: "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--ink); font-family: var(--font-ui);
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 40px 36px; width: 340px;
+  }
+  .mark {
+    width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--teal), var(--purple));
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-weight: 700; color: #04120c;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 4px; text-align: center; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin: 0 0 24px; text-align: center; }
+  label { display: block; text-align: left; font-size: 0.75rem; color: var(--muted); margin: 14px 0 4px; }
+  input {
+    width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid var(--line);
+    background: #0a0f16; color: var(--ink); font-family: var(--font-mono); font-size: 0.9rem;
+  }
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; }
+  .row .port-field { flex: 0 0 90px; }
+  button {
+    margin-top: 22px; width: 100%; padding: 11px; border: none; border-radius: 6px;
+    background: var(--teal); color: #04120c; font-weight: 600; cursor: pointer; font-size: 0.9rem;
+  }
+  button:hover { filter: brightness(1.08); }
+  .error { background: rgba(240,87,106,.15); color: var(--red); padding: 8px; border-radius: 6px; font-size: 0.8rem; margin-top: 14px; display: none; }
+  .hint { color: var(--muted); font-size: 0.72rem; margin-top: 18px; text-align: center; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="mark">GS</div>
+    <h1>Connect to GuardSpot</h1>
+    <p class="sub">Log in to a Raspberry Pi on your network</p>
+
+    <label for="pi-ip">Raspberry Pi IP address</label>
+    <div class="row">
+      <div><input type="text" id="pi-ip" placeholder="192.168.4.1" required></div>
+      <div class="port-field"><input type="text" id="pi-port" placeholder="5000" value="5000"></div>
+    </div>
+
+    <label for="username">Username</label>
+    <input type="text" id="username" placeholder="admin" required>
+
+    <label for="password">Password</label>
+    <input type="password" id="password" required>
+
+    <button id="connect-btn">Connect</button>
+    <div class="error" id="error-box">Couldn't reach that address. Check the IP, port, and that you're on the same network as the Pi.</div>
+
+    <p class="hint">This takes you directly to that Pi's dashboard — it doesn't store your password here, it's submitted straight to the Pi you specify.</p>
+  </div>
+
+<script>
+document.getElementById("connect-btn").addEventListener("click", () => {
+  const ip = document.getElementById("pi-ip").value.trim();
+  const port = document.getElementById("pi-port").value.trim() || "5000";
+  const username = document.getElementById("username").value;
+  const password = document.getElementById("password").value;
+  const errorBox = document.getElementById("error-box");
+
+  if (!ip || !username || !password) {
+    errorBox.textContent = "Fill in the IP address, username, and password.";
+    errorBox.style.display = "block";
+    return;
+  }
+
+  const targetUrl = `http://${ip}:${port}/login`;
+
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = targetUrl;
+
+  const userField = document.createElement("input");
+  userField.type = "hidden";
+  userField.name = "username";
+  userField.value = username;
+  form.appendChild(userField);
+
+  const passField = document.createElement("input");
+  passField.type = "hidden";
+  passField.name = "password";
+  passField.value = password;
+  form.appendChild(passField);
+
+  document.body.appendChild(form);
+  form.submit();
+});
+
+document.querySelectorAll("input").forEach(el => {
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("connect-btn").click();
+  });
+});
+</script>
+</body>
+</html>

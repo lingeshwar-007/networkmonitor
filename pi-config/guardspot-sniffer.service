@@ -1,0 +1,14 @@
+[Unit]
+Description=GuardSpot DNS Sniffer
+After=network.target guardspot-web.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/guardspot/networkmonitor
+ExecStart=/home/pi/guardspot/venv/bin/python3 sniffer.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

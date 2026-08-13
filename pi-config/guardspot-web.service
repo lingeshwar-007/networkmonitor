@@ -1,0 +1,17 @@
+[Unit]
+Description=GuardSpot Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/guardspot/networkmonitor
+ExecStart=/home/pi/guardspot/venv/bin/python3 app.py
+Restart=on-failure
+RestartSec=5
+Environment=GUARDSPOT_ADMIN=admin
+Environment=GUARDSPOT_ADMIN_PASSWORD=ChangeThisPassword
+Environment=GUARDSPOT_SECRET_KEY=change-this-to-something-random
+
+[Install]
+WantedBy=multi-user.target

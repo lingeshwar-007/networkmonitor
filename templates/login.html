@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}GuardSpot — Connect{% endblock %}
+{% block body %}
+<div class="login-wrap">
+  <form class="login-card" method="POST">
+    <div class="login-mark">GS</div>
+    <h1>GuardSpot</h1>
+    <p class="login-sub">Connect to your Raspberry Pi over SSH</p>
+    {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
+
+    <label>Raspberry Pi IP address</label>
+    <input type="text" name="pi_ip" placeholder="192.168.4.1" required>
+
+    <label>SSH username</label>
+    <input type="text" name="ssh_username" placeholder="pi" required>
+
+    <div class="auth-toggle">
+      <label><input type="radio" name="auth_method" value="password" checked onclick="toggleAuth('password')"> Password</label>
+      <label><input type="radio" name="auth_method" value="key" onclick="toggleAuth('key')"> SSH key</label>
+    </div>
+
+    <div id="password-field">
+      <label>SSH password</label>
+      <input type="password" name="password">
+    </div>
+
+    <div id="key-field" style="display:none;">
+      <label>Path to private key</label>
+      <input type="text" name="key_path" placeholder="/home/you/.ssh/id_rsa">
+    </div>
+
+    <button type="submit">Connect</button>
+  </form>
+</div>
+<script>
+function toggleAuth(mode) {
+  document.getElementById("password-field").style.display = mode === "password" ? "block" : "none";
+  document.getElementById("key-field").style.display = mode === "key" ? "block" : "none";
+}
+</script>
+{% endblock %}
