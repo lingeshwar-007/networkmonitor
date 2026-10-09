@@ -85,8 +85,8 @@ SECRET_KEY = os.environ.get("GUARDSPOT_SECRET_KEY", "change-this-in-production")
 ADMIN_USERNAME = os.environ.get("GUARDSPOT_ADMIN", "admin")
 ADMIN_PASSWORD = os.environ.get("GUARDSPOT_ADMIN_PASSWORD", "change-this-password")
 
-# Bind address and port
-HOST = os.environ.get("GUARDSPOT_HOST", "127.0.0.1")
+# Bind address and port: 0.0.0.0 on Pi allows browser access via the Pi's IP; 127.0.0.1 on Windows
+HOST = os.environ.get("GUARDSPOT_HOST", "0.0.0.0" if IS_PI else "127.0.0.1")
 PORT = int(os.environ.get("GUARDSPOT_PORT", 5000))
 
 # SSH connector settings (for remote control of Raspberry Pi)
