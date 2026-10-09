@@ -14,7 +14,14 @@ sudo apt install -y python3 python3-pip python3-venv \
                      libpcap-dev tcpdump \
                      dnsmasq \
                      hostapd \
-                     iptables
+                     iptables \
+                     conntrack \
+                     iw
+
+echo "== Setting up hostapd deny files =="
+sudo mkdir -p /etc/hostapd
+sudo touch /etc/hostapd/hostapd.deny
+sudo chmod 666 /etc/hostapd/hostapd.deny
 
 echo "== Creating Python virtual environment =="
 python3 -m venv venv

@@ -3,10 +3,15 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+venv_windows/
+win-venv/
 
 # Database
-networkmonitor/guardspot.db
+guardspot.db
 *.db
+*.db-shm
+*.db-wal
 
 # OS
 .DS_Store
+Thumbs.db

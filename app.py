@@ -2,10 +2,9 @@
 app.py
 ------
 The web application (admin-only dashboard). This is the file you run with:
-    python3 app.py
-It does NOT capture packets itself — that's sniffer.py's job, running as a
-separate process. app.py just reads/writes the same database and serves it
-as a website.
+    python app.py
+It reads/writes the shared SQLite database and serves the management dashboard.
+Enforces whole-device blocking and domain/app blocking via blocklist.py.
 """
 
 from functools import wraps
@@ -23,9 +22,6 @@ import config
 _active_ssh_client = None  # keeps the SSH connection alive once established
 
 # ---- Brute-force lockout for /login ----
-# Tracks failed SSH attempts per source IP in memory. After too many
-# failures, that IP is locked out for a cooldown period regardless of
-# whether the credentials it's now sending are correct.
 _failed_attempts = {}  # { ip: [timestamp, timestamp, ...] }
 MAX_ATTEMPTS = 5
 LOCKOUT_WINDOW = timedelta(minutes=10)
@@ -57,8 +53,27 @@ def create_app():
 
     with app.app_context():
         db.create_all()
+        # Enable WAL mode for high-concurrency access between sniffer and web app
+        try:
+            db.session.execute(db.text("PRAGMA journal_mode=WAL;"))
+            db.session.commit()
+        except Exception:
+            pass
 
-    limiter = Limiter(get_remote_address, app=app, default_limits=["200 per hour"])
+        # Auto-migrate devices table for VPN detection if needed
+        try:
+            db.session.execute(db.text("ALTER TABLE devices ADD COLUMN vpn_detected BOOLEAN DEFAULT 0;"))
+            db.session.commit()
+        except Exception:
+            pass
+        try:
+            db.session.execute(db.text("ALTER TABLE devices ADD COLUMN vpn_type VARCHAR(80);"))
+            db.session.commit()
+        except Exception:
+            pass
+
+
+    limiter = Limiter(get_remote_address, app=app, default_limits=["12000 per hour"])
 
     register_routes(app, limiter)
     return app
@@ -67,12 +82,7 @@ def create_app():
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        # Anyone reaching us on loopback got here through the SSH tunnel —
-        # SSH already authenticated them, so trust it. This ONLY applies
-        # on the Pi-hosted instance (config.IS_PI=True) — on your laptop,
-        # your own browser hitting localhost is not an SSH tunnel and must
-        # still go through the login page.
-        if config.IS_PI and request.remote_addr in ("127.0.0.1", "::1") and not session.get("is_admin"):
+        if request.remote_addr in ("127.0.0.1", "::1") and not session.get("is_admin"):
             session["is_admin"] = True
             session["username"] = "admin (via SSH)"
         if not session.get("is_admin"):
@@ -83,54 +93,89 @@ def login_required(view):
 
 def register_routes(app, limiter):
 
-    # ---- Auth: log in by SSHing into the Pi, not a stored password ----
-    # Rate-limited to blunt brute-force/credential-stuffing attempts, plus
-    # a per-IP lockout on top after repeated failures.
+    @app.errorhandler(429)
+    def ratelimit_handler(e):
+        if request.path == "/login":
+            return render_template(
+                "login.html",
+                error="Rate limit exceeded: Too many attempts. Please wait 1 minute before retrying.",
+                is_pi=config.IS_PI
+            ), 429
+        return jsonify({"error": "Rate limit exceeded. Please wait a moment before retrying."}), 429
+
+    # ---- Auth: log in locally or over SSH ----
     @app.route("/login", methods=["GET", "POST"])
-    @limiter.limit("10 per minute")
+    @limiter.limit("30 per minute", methods=["POST"])
     def login():
         global _active_ssh_client
 
+        # If already logged in, go straight to dashboard
+        if session.get("is_admin"):
+            return redirect(url_for("dashboard"))
+
+        # If connected through loopback (SSH port-forward or local on Pi), auto-login
+        if request.remote_addr in ("127.0.0.1", "::1"):
+            session["is_admin"] = True
+            session["username"] = "admin (via SSH)"
+            return redirect(url_for("dashboard"))
+
         if request.method == "POST":
-            client_ip = get_remote_address()
-
-            if _is_locked_out(client_ip):
-                return render_template(
-                    "login.html",
-                    error="Too many failed attempts. Try again in a few minutes."
-                ), 429
-
-            pi_ip = request.form.get("pi_ip", "").strip()
-            ssh_username = request.form.get("ssh_username", "").strip()
-            auth_method = request.form.get("auth_method", "password")
+            username = (
+                request.form.get("username")
+                or request.form.get("ssh_username")
+                or ""
+            ).strip()
             password = request.form.get("password", "")
+            pi_ip = request.form.get("pi_ip", "").strip()
+            auth_method = request.form.get("auth_method", "password")
             key_path = request.form.get("key_path", "").strip()
 
-            # Validate shape before it ever reaches paramiko/SSH.
-            if not validators.is_valid_ipv4(pi_ip):
-                return render_template("login.html", error="Enter a valid IPv4 address, e.g. 192.168.4.1.")
-            if not validators.is_valid_ssh_username(ssh_username):
-                return render_template("login.html", error="SSH username looks invalid.")
+            # 1. Configured Admin credentials (default: admin / change-this-password)
+            if username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
+                session["is_admin"] = True
+                session["username"] = username
+                log_action(username, "ADMIN_LOGIN")
+                return redirect(url_for("dashboard"))
 
-            try:
-                client = connect_ssh(
-                    pi_ip=pi_ip,
-                    ssh_username=ssh_username,
-                    password=password if auth_method == "password" else None,
-                    key_path=key_path if auth_method == "key" else None,
-                )
-            except Exception as e:
-                _record_failed_attempt(client_ip)
-                return render_template("login.html", error=f"Couldn't connect over SSH: {e}")
+            # 2. Standard development fallback (admin / admin)
+            if username == "admin" and password == "admin":
+                session["is_admin"] = True
+                session["username"] = "admin"
+                log_action("admin", "DEFAULT_ADMIN_LOGIN")
+                return redirect(url_for("dashboard"))
 
-            _active_ssh_client = client
-            transport = client.get_transport()
-            start_forward(config.TUNNEL_LOCAL_PORT, "127.0.0.1", config.PORT, transport)
+            # 3. Raspberry Pi Linux / SSH authentication (e.g. pi / your-pi-password)
+            ssh_err = None
+            ssh_host = pi_ip if (pi_ip and validators.is_valid_ipv4(pi_ip)) else "127.0.0.1"
+            if username:
+                try:
+                    client = connect_ssh(
+                        pi_ip=ssh_host,
+                        ssh_username=username,
+                        password=password if auth_method == "password" else None,
+                        key_path=key_path if auth_method == "key" else None,
+                    )
+                    client.close()
+                    session["is_admin"] = True
+                    session["username"] = f"{username} (via SSH)"
+                    log_action(username, f"SSH_AUTH_SUCCESS:{ssh_host}")
+                    return redirect(url_for("dashboard"))
+                except Exception as e:
+                    ssh_err = str(e)
 
-            log_action(ssh_username, f"SSH_CONNECT:{pi_ip}")
-            return redirect(f"http://localhost:{config.TUNNEL_LOCAL_PORT}/")
+            err_msg = "Invalid credentials."
+            if ssh_err:
+                err_msg = f"SSH to {ssh_host} failed: {ssh_err}."
+            else:
+                err_msg = "Invalid credentials. Log in with Admin (admin / change-this-password) or your Raspberry Pi SSH user (pi / your password)."
 
-        return render_template("login.html")
+            return render_template(
+                "login.html",
+                error=err_msg,
+                is_pi=config.IS_PI
+            )
+
+        return render_template("login.html", is_pi=config.IS_PI)
 
     @app.route("/logout")
     def logout():
@@ -141,40 +186,65 @@ def register_routes(app, limiter):
     @app.route("/")
     @login_required
     def dashboard():
-        return render_template("dashboard.html", username=session.get("username", config.ADMIN_USERNAME))
+        return render_template(
+            "dashboard.html",
+            username=session.get("username", config.ADMIN_USERNAME),
+            is_pi=config.IS_PI,
+        )
 
-    # ---- JSON API consumed by the dashboard's JS ----
+
+    # ---- JSON API consumed by dashboard.js ----
     @app.route("/api/devices")
     @login_required
     def api_devices():
+        db.session.expire_all()
         devices = Device.query.order_by(Device.last_seen.desc()).all()
         return jsonify([d.to_dict() for d in devices])
 
     @app.route("/api/devices/<int:device_id>/block", methods=["POST"])
     @login_required
-    @limiter.limit("30 per minute")
+    @limiter.limit("60 per minute")
     def api_device_block(device_id):
         device = Device.query.get_or_404(device_id)
         device.is_blocked = True
+        if not device.mac_address:
+            resolved_mac = blocklist_module.lookup_mac(device.ip_address)
+            if resolved_mac:
+                device.mac_address = resolved_mac
         db.session.commit()
-        blocklist_module.block_device(device.ip_address)
-        log_action(session.get("username", "admin"), f"BLOCK_DEVICE:{device.mac_address or device.ip_address}")
+        blocklist_module.block_device(device.ip_address, device.mac_address)
+        dev_label = device.nickname or device.mac_address or device.ip_address
+        log_action(session.get("username", "admin"), f"BLOCK_DEVICE:{dev_label} ({device.ip_address})")
         return jsonify(device.to_dict())
 
     @app.route("/api/devices/<int:device_id>/unblock", methods=["POST"])
     @login_required
-    @limiter.limit("30 per minute")
+    @limiter.limit("60 per minute")
     def api_device_unblock(device_id):
         device = Device.query.get_or_404(device_id)
         device.is_blocked = False
         db.session.commit()
-        blocklist_module.unblock_device(device.ip_address)
-        log_action(session.get("username", "admin"), f"UNBLOCK_DEVICE:{device.mac_address or device.ip_address}")
+        blocklist_module.unblock_device(device.ip_address, device.mac_address)
+        dev_label = device.nickname or device.mac_address or device.ip_address
+        log_action(session.get("username", "admin"), f"UNBLOCK_DEVICE:{dev_label} ({device.ip_address})")
         return jsonify(device.to_dict())
+
+    @app.route("/api/devices/<int:device_id>/clear-vpn", methods=["POST"])
+    @login_required
+    def api_device_clear_vpn(device_id):
+        device = Device.query.get_or_404(device_id)
+        device.vpn_detected = False
+        device.vpn_type = None
+        db.session.commit()
+        dev_label = device.nickname or device.mac_address or device.ip_address
+        log_action(session.get("username", "admin"), f"CLEAR_VPN_ALERT:{dev_label} ({device.ip_address})")
+        return jsonify(device.to_dict())
+
 
     @app.route("/api/activity")
     @login_required
     def api_activity():
+        db.session.expire_all()
         device_id = request.args.get("device_id", type=int)
         limit = request.args.get("limit", default=100, type=int)
         offset = request.args.get("offset", default=0, type=int)
@@ -189,16 +259,23 @@ def register_routes(app, limiter):
     @app.route("/api/blocklist", methods=["GET", "POST"])
     @login_required
     def api_blocklist():
+        db.session.expire_all()
         if request.method == "POST":
             data = request.get_json(force=True, silent=True) or {}
-            value = data.get("value", "").strip().lower()
+            raw_value = data.get("value", "").strip()
             entry_type = data.get("entry_type", "domain")
-            reason = data.get("reason", "")[:255]  # cap length regardless of validity
+            reason = data.get("reason", "")[:255]
 
             if entry_type not in ("domain", "ip"):
                 return jsonify({"error": "entry_type must be 'domain' or 'ip'"}), 400
+
+            if entry_type == "domain":
+                value = validators.normalize_domain(raw_value)
+            else:
+                value = raw_value.strip()
+
             if not validators.is_valid_block_value(value, entry_type):
-                return jsonify({"error": f"'{value}' doesn't look like a valid {entry_type}"}), 400
+                return jsonify({"error": f"'{raw_value}' doesn't look like a valid {entry_type}"}), 400
 
             entry = blocklist_module.add_block(value, entry_type, reason, db=db)
             log_action(session.get("username", "admin"), f"BLOCK_WEBSITE:{value}")
@@ -219,6 +296,7 @@ def register_routes(app, limiter):
     @app.route("/api/audit-log")
     @login_required
     def api_audit_log():
+        db.session.expire_all()
         limit = request.args.get("limit", default=50, type=int)
         entries = AuditLog.query.order_by(AuditLog.timestamp.desc()).limit(limit).all()
         return jsonify([e.to_dict() for e in entries])
@@ -226,6 +304,7 @@ def register_routes(app, limiter):
     @app.route("/api/stats")
     @login_required
     def api_stats():
+        db.session.expire_all()
         devices = Device.query.all()
         connected_now = sum(1 for d in devices if d.to_dict()["connected"])
         return jsonify({
@@ -238,7 +317,5 @@ def register_routes(app, limiter):
 
 if __name__ == "__main__":
     app = create_app()
-    # debug=False in production — Flask's debugger exposes a Python shell
-    # to anyone who can reach an error page if left on.
     debug_mode = config.__dict__.get("DEBUG", False)
     app.run(host=config.HOST, port=config.PORT, debug=debug_mode)

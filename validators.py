@@ -26,6 +26,17 @@ DOMAIN_RE = re.compile(
 )
 
 
+def normalize_domain(value: str) -> str:
+    """Strips http(s)://, paths, query params, ports, and leading www./trailing dots."""
+    val = (value or "").strip().lower()
+    if "://" in val:
+        val = val.split("://", 1)[1]
+    val = val.split("/")[0].split("?")[0].split(":")[0]
+    if val.startswith("www."):
+        val = val[4:]
+    return val.strip(".")
+
+
 def is_valid_ipv4(value: str) -> bool:
     return bool(IPV4_RE.match(value or ""))
 
@@ -35,7 +46,8 @@ def is_valid_ssh_username(value: str) -> bool:
 
 
 def is_valid_domain(value: str) -> bool:
-    return bool(DOMAIN_RE.match(value or ""))
+    norm = normalize_domain(value)
+    return bool(DOMAIN_RE.match(norm))
 
 
 def is_valid_block_value(value: str, entry_type: str) -> bool:
@@ -44,3 +56,4 @@ def is_valid_block_value(value: str, entry_type: str) -> bool:
     if entry_type == "domain":
         return is_valid_domain(value)
     return False
+

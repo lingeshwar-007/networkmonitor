@@ -15,7 +15,7 @@ from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy()
 
 # A device counts as "connected" if we've seen traffic from it within this window.
-ONLINE_THRESHOLD = timedelta(seconds=90)
+ONLINE_THRESHOLD = timedelta(minutes=5)
 
 
 class Device(db.Model):
@@ -28,6 +28,8 @@ class Device(db.Model):
     first_seen = db.Column(db.DateTime, default=datetime.utcnow)
     last_seen = db.Column(db.DateTime, default=datetime.utcnow)
     is_blocked = db.Column(db.Boolean, default=False, nullable=False)  # whole-device block
+    vpn_detected = db.Column(db.Boolean, default=False, nullable=False)  # VPN usage detected
+    vpn_type = db.Column(db.String(80), nullable=True)  # e.g. "WireGuard (51820)", "NordVPN"
 
     logs = db.relationship("ActivityLog", backref="device", lazy="dynamic")
 
@@ -42,8 +44,11 @@ class Device(db.Model):
             "first_seen": self.first_seen.isoformat(),
             "last_seen": self.last_seen.isoformat(),
             "is_blocked": self.is_blocked,
+            "vpn_detected": getattr(self, "vpn_detected", False),
+            "vpn_type": getattr(self, "vpn_type", None),
             "connected": is_connected,
         }
+
 
 
 class ActivityLog(db.Model):
