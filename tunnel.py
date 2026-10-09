@@ -49,16 +49,85 @@ def _make_handler(remote_host, remote_port, transport):
     return Handler
 
 
+import socket
+import re
+import subprocess
+
+
+def resolve_pi_host(host_or_ip: str = "guardspot") -> str:
+    """Resolve a hostname like 'guardspot' or 'guardspot.local' to its dynamic DHCP IP."""
+    target = (host_or_ip or "guardspot").strip()
+
+    # 1. Direct DNS / NetBIOS / mDNS resolution
+    try:
+        return socket.gethostbyname(target)
+    except Exception:
+        pass
+
+    # 2. Try .local suffix
+    if not target.endswith(".local"):
+        try:
+            return socket.gethostbyname(f"{target}.local")
+        except Exception:
+            pass
+
+    # 3. Try standard Raspberry Pi hostnames
+    for name in ("guardspot", "guardspot.local", "raspberrypi", "raspberrypi.local"):
+        try:
+            return socket.gethostbyname(name)
+        except Exception:
+            pass
+
+    # 4. Check ARP table for LAN IPs that respond on SSH port 22
+    try:
+        arp_output = subprocess.check_output("arp -a", shell=True).decode(errors="ignore")
+        lan_ips = re.findall(r"(\b192\.168\.\d+\.\d+\b|\b10\.\d+\.\d+\.\d+\b)", arp_output)
+        for ip in set(lan_ips):
+            if ip.endswith(".255") or ip.endswith(".1"):
+                continue
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.4)
+                if s.connect_ex((ip, 22)) == 0:
+                    s.close()
+                    return ip
+                s.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return target
+
+
+def ensure_remote_services(client):
+    """Ensure sniffer.py and the web app are actively running on the Raspberry Pi."""
+    try:
+        # Check if sniffer is already running; if not, launch it
+        _, stdout, _ = client.exec_command("pgrep -f sniffer.py")
+        if not stdout.read().strip():
+            client.exec_command(
+                "nohup sudo python3 ~/Downloads/networkmonitor/sniffer.py > /tmp/sniffer.log 2>&1 &"
+            )
+    except Exception:
+        pass
+
+
 def connect_ssh(pi_ip, ssh_username, password=None, key_path=None, ssh_port=22):
-    """Opens an SSH connection to the Pi. Raises on failure."""
+    """Opens an SSH connection to the Pi (resolving dynamic DHCP hostname). Raises on failure."""
+    resolved_host = resolve_pi_host(pi_ip)
+
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     if key_path:
         pkey = paramiko.RSAKey.from_private_key_file(key_path)
-        client.connect(pi_ip, port=ssh_port, username=ssh_username, pkey=pkey, timeout=10)
+        client.connect(resolved_host, port=ssh_port, username=ssh_username, pkey=pkey, timeout=10)
     else:
-        client.connect(pi_ip, port=ssh_port, username=ssh_username, password=password, timeout=10)
+        client.connect(resolved_host, port=ssh_port, username=ssh_username, password=password, timeout=10)
+
+    # Automatically ensure packet sniffer is capturing on the Pi
+    ensure_remote_services(client)
 
     return client
 

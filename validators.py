@@ -37,8 +37,19 @@ def normalize_domain(value: str) -> str:
     return val.strip(".")
 
 
+HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]{0,61}[a-zA-Z0-9])?$")
+
+
 def is_valid_ipv4(value: str) -> bool:
     return bool(IPV4_RE.match(value or ""))
+
+
+def is_valid_host(value: str) -> bool:
+    """Accepts valid IPv4 address or hostname (e.g. 'guardspot', 'guardspot.local')."""
+    if not value:
+        return False
+    val = value.strip().lower()
+    return is_valid_ipv4(val) or bool(HOSTNAME_RE.match(val))
 
 
 def is_valid_ssh_username(value: str) -> bool:

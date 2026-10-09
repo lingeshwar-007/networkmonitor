@@ -144,9 +144,9 @@ def register_routes(app, limiter):
                 log_action("admin", "DEFAULT_ADMIN_LOGIN")
                 return redirect(url_for("dashboard"))
 
-            # 3. Raspberry Pi Linux / SSH authentication (e.g. pi / your-pi-password)
+            # 3. Raspberry Pi Linux / SSH authentication (e.g. guardspot / your-pi-password)
             ssh_err = None
-            ssh_host = pi_ip if (pi_ip and validators.is_valid_ipv4(pi_ip)) else "127.0.0.1"
+            ssh_host = pi_ip if (pi_ip and validators.is_valid_host(pi_ip)) else "guardspot"
             if username:
                 try:
                     client = connect_ssh(
@@ -155,10 +155,22 @@ def register_routes(app, limiter):
                         password=password if auth_method == "password" else None,
                         key_path=key_path if auth_method == "key" else None,
                     )
-                    client.close()
                     session["is_admin"] = True
                     session["username"] = f"{username} (via SSH)"
                     log_action(username, f"SSH_AUTH_SUCCESS:{ssh_host}")
+
+                    # If running on laptop, forward tunnel to Pi's live web dashboard
+                    if not config.IS_PI:
+                        global _active_ssh_client
+                        _active_ssh_client = client
+                        transport = client.get_transport()
+                        try:
+                            start_forward(config.TUNNEL_LOCAL_PORT, "127.0.0.1", config.PORT, transport)
+                        except Exception:
+                            pass
+                        return redirect(f"http://localhost:{config.TUNNEL_LOCAL_PORT}/")
+
+                    client.close()
                     return redirect(url_for("dashboard"))
                 except Exception as e:
                     ssh_err = str(e)

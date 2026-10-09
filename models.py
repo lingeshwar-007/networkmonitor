@@ -111,6 +111,13 @@ class AuditLog(db.Model):
 
 def log_action(actor: str, action: str):
     """Convenience helper — call this anywhere an admin action happens."""
-    entry = AuditLog(actor=actor, action=action)
-    db.session.add(entry)
-    db.session.commit()
+    try:
+        entry = AuditLog(actor=actor, action=action)
+        db.session.add(entry)
+        db.session.commit()
+    except Exception as e:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        print(f"[WARN] Failed to write audit log: {e}")

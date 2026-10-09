@@ -8,11 +8,11 @@
     <p class="login-sub">Connect to your Raspberry Pi over SSH</p>
     {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
 
-    <label>Raspberry Pi IP address</label>
-    <input type="text" name="pi_ip" placeholder="192.168.4.1" required>
+    <label>Raspberry Pi Hostname or IP</label>
+    <input type="text" name="pi_ip" value="guardspot" placeholder="guardspot (or IP address)">
 
     <label>SSH username</label>
-    <input type="text" name="ssh_username" placeholder="pi" required>
+    <input type="text" name="ssh_username" value="guardspot" placeholder="guardspot" required>
 
     <div class="auth-toggle">
       <label><input type="radio" name="auth_method" value="password" checked onclick="toggleAuth('password')"> Password</label>
