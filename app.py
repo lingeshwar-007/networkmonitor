@@ -82,7 +82,8 @@ def create_app():
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if request.remote_addr in ("127.0.0.1", "::1") and not session.get("is_admin"):
+        # On the Raspberry Pi, local loopback represents an established SSH tunnel
+        if config.IS_PI and request.remote_addr in ("127.0.0.1", "::1") and not session.get("is_admin"):
             session["is_admin"] = True
             session["username"] = "admin (via SSH)"
         if not session.get("is_admin"):
@@ -113,8 +114,8 @@ def register_routes(app, limiter):
         if session.get("is_admin"):
             return redirect(url_for("dashboard"))
 
-        # If connected through loopback (SSH port-forward or local on Pi), auto-login
-        if request.remote_addr in ("127.0.0.1", "::1"):
+        # If connected through loopback on the Pi (SSH port-forward or local on Pi), auto-login
+        if config.IS_PI and request.remote_addr in ("127.0.0.1", "::1"):
             session["is_admin"] = True
             session["username"] = "admin (via SSH)"
             return redirect(url_for("dashboard"))
