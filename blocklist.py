@@ -47,6 +47,9 @@ DOMAIN_APP_EXPANSIONS = {
     ],
     "instagram.com": [
         "instagram.com",
+        "insta.com",
+        "i.insta.com",
+        "ig.com",
         "i.instagram.com",
         "cdninstagram.com",
         "ig.me",
@@ -62,6 +65,15 @@ DOMAIN_APP_EXPANSIONS = {
         "facebook.net",
         "fbsbx.com",
         "meta.com",
+    ],
+    "insta.com": [
+        "instagram.com",
+        "insta.com",
+        "i.insta.com",
+        "i.instagram.com",
+        "cdninstagram.com",
+        "ig.me",
+        "fbcdn.net",
     ],
     "tiktok.com": [
         "tiktokcdn.com",

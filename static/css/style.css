@@ -537,6 +537,43 @@ body {
   border-color: #dc2626;
 }
 
+/* ---- Quick App Blocker Pills ---- */
+.quick-app-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.quick-app-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  width: 100%;
+  margin-bottom: 2px;
+}
+
+.quick-app-pill {
+  background: #182230;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 5px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.quick-app-pill:hover {
+  background: var(--red-dim);
+  border-color: var(--red);
+  color: var(--red);
+}
+
 #blocklist-items { list-style: none; margin: 10px 0 0; padding: 0; }
 #blocklist-items li {
   display: flex;

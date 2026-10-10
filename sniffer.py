@@ -28,7 +28,7 @@ import re
 from scapy.all import sniff, send, DNS, DNSQR, DNSRR, IP, UDP, TCP, conf
 
 from app import create_app
-from models import db, Device, ActivityLog
+from models import db, Device, ActivityLog, log_action
 import blocklist
 import vpn_detector
 import config
@@ -288,11 +288,30 @@ def handle_query(pkt):
             print(f"[VPN BLOCKED] {src_ip} -> {domain} ({vpn_service} lookup sinkholed)")
             return
 
-        # 3. Website & App block check (includes CDNs e.g. googlevideo.com for youtube.com)
+        # 3. Website & App block check (includes CDNs e.g. i.instagram.com, googlevideo.com, etc.)
         is_dom_blocked = blocklist.is_blocked(domain)
         if is_dom_blocked:
             # Active DNS Sinkhole: respond with 0.0.0.0 immediately
             send_dns_sinkhole(pkt, pkt[DNSQR].qname, qtype, rcode=0)
+
+            # AUTO-DEFENSE / SUDDEN QUARANTINE:
+            # When any device attempts to use a blocked service (web or app),
+            # immediately isolate and block that entire device from the Pi!
+            if not device.is_blocked:
+                device.is_blocked = True
+                if not device.mac_address:
+                    resolved_mac = blocklist.lookup_mac(src_ip)
+                    if resolved_mac:
+                        device.mac_address = resolved_mac
+                db.session.commit()
+                blocklist.block_device(src_ip, device.mac_address)
+                dev_label = device.nickname or device.mac_address or src_ip
+                try:
+                    log_action("AUTO_FIREWALL", f"AUTO_BLOCKED_DEVICE: {dev_label} ({src_ip}) for accessing blocked {domain}")
+                except Exception:
+                    pass
+                print(f"[AUTO-DEFENSE TRIGGERED] {src_ip} ({dev_label}) tried accessing '{domain}'! Device has been IMMEDIATELY CUT OFF and KICKED from Wi-Fi!")
+
             log_entry = ActivityLog(
                 device_id=device.id,
                 domain=domain,
@@ -301,7 +320,7 @@ def handle_query(pkt):
             )
             db.session.add(log_entry)
             db.session.commit()
-            print(f"[WEBSITE BLOCKED] {src_ip} -> {domain} (sinkholed to 0.0.0.0)")
+            print(f"[WEBSITE & APP BLOCKED] {src_ip} -> {domain} (sinkholed & device isolated)")
             return
 
         # 4. Allowed request
