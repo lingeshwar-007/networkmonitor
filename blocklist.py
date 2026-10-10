@@ -46,6 +46,8 @@ DOMAIN_APP_EXPANSIONS = {
         "yt3.ggpht.com",
     ],
     "instagram.com": [
+        "instagram.com",
+        "i.instagram.com",
         "cdninstagram.com",
         "ig.me",
         "threads.net",
@@ -139,11 +141,21 @@ def get_root_service(domain: str) -> str:
 def get_expanded_domains(domain: str) -> list:
     """Return all related domains and CDNs for a given service."""
     norm = validators.normalize_domain(domain)
+    
+    # Check exact match
     if norm in DOMAIN_APP_EXPANSIONS:
-        return [norm] + DOMAIN_APP_EXPANSIONS[norm]
+        return list(set([norm] + DOMAIN_APP_EXPANSIONS[norm]))
+    
+    # Check parent/base domain (e.g. i.instagram.com -> instagram.com)
+    parts = norm.split(".")
+    if len(parts) >= 2:
+        base = ".".join(parts[-2:])
+        if base in DOMAIN_APP_EXPANSIONS:
+            return list(set([base, norm] + DOMAIN_APP_EXPANSIONS[base]))
+
     root = EXPANSION_TO_ROOT.get(norm)
     if root and root in DOMAIN_APP_EXPANSIONS:
-        return [root] + DOMAIN_APP_EXPANSIONS[root]
+        return list(set([root, norm] + DOMAIN_APP_EXPANSIONS[root]))
     return [norm]
 
 
@@ -517,6 +529,9 @@ def enforce_block(value: str, entry_type: str):
             _append_dnsmasq_rule(dom)
             for ip in ips:
                 _add_iptables_drop(ip)
+            # Prevent devices from bypassing hotspot DNS with Private DNS (DNS-over-TLS port 853)
+            _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "DROP"])
+            _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
 
 
 def unenforce_block(value: str, entry_type: str):
