@@ -459,23 +459,27 @@ def _windows_remove_rules(rule_name: str):
 
 
 def resolve_domain_ips(domain: str) -> list:
-    """Resolve a domain and its common prefixes to published IPv4/IPv6 addresses."""
+    """Resolve a domain to published IPv4/IPv6 addresses with short timeout."""
     ips = []
     targets = [domain]
-    if not domain.startswith("www."):
+    # Only test www. if this is an apex domain (e.g. instagram.com, not api.instagram.com)
+    if domain.count(".") == 1 and not domain.startswith("www."):
         targets.append(f"www.{domain}")
-    if not domain.startswith("m."):
-        targets.append(f"m.{domain}")
 
-    for t in targets:
-        try:
-            addr_info = socket.getaddrinfo(t, None)
-            for item in addr_info:
-                ip = item[4][0]
-                if ip and ip not in ips and ip != "0.0.0.0" and ip != "::":
-                    ips.append(ip)
-        except Exception:
-            pass
+    old_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(0.5)
+        for t in targets:
+            try:
+                addr_info = socket.getaddrinfo(t, None)
+                for item in addr_info:
+                    ip = item[4][0]
+                    if ip and ip not in ips and ip not in ("0.0.0.0", "::"):
+                        ips.append(ip)
+            except Exception:
+                pass
+    finally:
+        socket.setdefaulttimeout(old_timeout)
     return ips
 
 
@@ -506,8 +510,7 @@ def _append_dnsmasq_rule(domain: str):
     ]
     for d in DNSMASQ_DIRS:
         try:
-            if os.path.exists(d) or d == "/etc/dnsmasq.d":
-                os.makedirs(d, exist_ok=True)
+            if os.path.exists(d):
                 filepath = os.path.join(d, "guardspot_blocklist.conf")
                 existing = ""
                 if os.path.exists(filepath):
@@ -519,7 +522,6 @@ def _append_dnsmasq_rule(domain: str):
                             f.write(l)
         except Exception as e:
             print(f"[blocklist] Failed to write dnsmasq rule ({d}): {e}")
-    _restart_dnsmasq()
 
 
 def _remove_dnsmasq_rule(domain: str):
@@ -536,14 +538,15 @@ def _remove_dnsmasq_rule(domain: str):
                             f.write(line)
         except Exception as e:
             print(f"[blocklist] Failed to remove dnsmasq rule ({filepath}): {e}")
-    _restart_dnsmasq()
 
 
 def _restart_dnsmasq():
-    """Reloads dnsmasq and NetworkManager to apply blocklist changes without dropping leases."""
+    """Reloads dnsmasq and NetworkManager if active without dropping leases."""
     _run_privileged(["sudo", "killall", "-HUP", "dnsmasq"])
-    _run_privileged(["sudo", "systemctl", "reload", "dnsmasq"])
-    _run_privileged(["sudo", "systemctl", "reload", "NetworkManager"])
+    # Check if dnsmasq systemd unit actually exists before attempting reload
+    res = _run_privileged(["systemctl", "is-active", "--quiet", "dnsmasq"])
+    if res and res.returncode == 0:
+        _run_privileged(["sudo", "systemctl", "reload", "dnsmasq"])
 
 
 def _hostapd_deny_add(mac: str):
@@ -612,8 +615,7 @@ def _dnsmasq_deny_add(mac: str):
     rule = f"dhcp-host={norm_mac},ignore\n"
     for d in DNSMASQ_DIRS:
         try:
-            if os.path.exists(d) or d == "/etc/dnsmasq.d":
-                os.makedirs(d, exist_ok=True)
+            if os.path.exists(d):
                 filepath = os.path.join(d, "guardspot_deny.conf")
                 existing = ""
                 if os.path.exists(filepath):
@@ -670,12 +672,32 @@ def _remove_iptables_drop(ip_or_cidr: str):
     _run_privileged(["sudo", tool, "-D", "OUTPUT", "-d", ip_or_cidr, "-j", "DROP"])
 
 
+def is_port_53_listening() -> bool:
+    """Check if a local DNS server is listening on port 53."""
+    if IS_WINDOWS:
+        return False
+    try:
+        out = subprocess.check_output("ss -lupn sport = :53", shell=True, text=True, stderr=subprocess.DEVNULL)
+        if ":53" in out:
+            return True
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("0.0.0.0", 53))
+        s.close()
+        return False
+    except Exception:
+        return True
+
+
 def init_gateway_firewall():
     """
     Initializes Raspberry Pi / Linux gateway firewall foundations:
     1. Enables IP packet forwarding in sysctl.
-    2. Hijacks DNS (port 53 UDP/TCP) in PREROUTING to redirect all external DNS queries to local sinkhole.
-    3. Blocks DNS-over-TLS (port 853) on IPv4 & IPv6 with TCP reset so clients fall back to port 53.
+    2. If a local DNS server is listening on port 53, redirects incoming DNS queries on hotspot interface to it.
+       If not, cleans up stale redirects so DNS queries flow naturally to upstream.
+    3. Blocks DNS-over-TLS (port 853) on IPv4 & IPv6 with TCP reset so clients fall back to standard DNS.
     """
     if IS_WINDOWS:
         return
@@ -684,16 +706,24 @@ def init_gateway_firewall():
     _run_privileged(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"])
     _run_privileged(["sudo", "sysctl", "-w", "net.ipv6.conf.all.forwarding=1"])
 
-    # 2. Intercept Port 53 DNS so clients cannot query external DNS (8.8.8.8, 1.1.1.1, etc.)
-    check_udp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-    if not check_udp or check_udp.returncode != 0:
-        _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+    # 2. Port 53 DNS redirection
+    iface = config.CAPTURE_INTERFACE if config.CAPTURE_INTERFACE else "wlan0"
+    if is_port_53_listening():
+        check_udp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        if not check_udp or check_udp.returncode != 0:
+            _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        check_tcp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        if not check_tcp or check_tcp.returncode != 0:
+            _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        print(f"[firewall] DNS redirection active on {iface}: all client port 53 queries sent to local sinkhole.")
+    else:
+        # Clean up any unconditional port 53 redirects that break outbound queries
+        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
 
-    check_tcp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-    if not check_tcp or check_tcp.returncode != 0:
-        _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-
-    # 3. Block DNS-over-TLS (port 853) on IPv4 and IPv6 so mobile Private DNS falls back to port 53
+    # 3. Block DNS-over-TLS (port 853) on IPv4 and IPv6 so mobile Private DNS falls back to standard DNS
     check_dot_v4 = _run_privileged(["sudo", "iptables", "-C", "FORWARD", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
     if not check_dot_v4 or check_dot_v4.returncode != 0:
         _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
@@ -704,7 +734,7 @@ def init_gateway_firewall():
         _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
         _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
 
-    print("[firewall] Gateway firewall initialized: IP forwarding ON, DNS redirected to local sinkhole, DoT blocked.")
+    print("[firewall] Gateway firewall initialized: IP forwarding ON, DoT blocked.")
 
 
 # ==============================================================================
@@ -733,21 +763,22 @@ def enforce_block(value: str, entry_type: str):
         else:
             _add_iptables_drop(cidr)
 
-    # 3. Sinkhole each expanded domain in dnsmasq and resolve dynamic IPs
+    # 3. Sinkhole each expanded domain in dnsmasq configs
     for dom in expanded_domains:
-        safe_domain = re.sub(r'[^a-zA-Z0-9.-]', '_', dom)
-        ips = resolve_domain_ips(dom)
+        _append_dnsmasq_rule(dom)
 
-        if IS_WINDOWS:
-            for ip in ips:
-                _windows_add_ip_rule(f"GuardSpot_Domain_{safe_domain}_{ip}", ip)
-        else:
-            _append_dnsmasq_rule(dom)
-            for ip in ips:
-                _add_iptables_drop(ip)
+    # 4. Resolve only the root value and direct domain IPs (fast, non-blocking)
+    root_ips = resolve_domain_ips(value)
+    if IS_WINDOWS:
+        for ip in root_ips:
+            _windows_add_ip_rule(f"GuardSpot_Domain_{safe_val}_{ip}", ip)
+    else:
+        for ip in root_ips:
+            _add_iptables_drop(ip)
 
-    # 4. Flush active connections so open streams/apps die instantly
+    # 5. Reload dnsmasq once at the end and flush active connections
     if not IS_WINDOWS:
+        _restart_dnsmasq()
         _run_privileged(["sudo", "conntrack", "-F"])
 
 
