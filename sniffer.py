@@ -332,9 +332,9 @@ def handle_response(pkt):
 
         for i in range(pkt[DNS].ancount):
             rr = pkt[DNS].an[i]
-            if rr.type == 1:  # IPv4 A record
+            if rr.type in (1, 28):  # 1 = IPv4 A record, 28 = IPv6 AAAA record
                 resolved_ip = rr.rdata
-                if resolved_ip and resolved_ip != "0.0.0.0":
+                if resolved_ip and resolved_ip not in ("0.0.0.0", "::"):
                     blocklist.enforce_domain_ip(domain, resolved_ip)
                     print(f"[FIREWALL SYNC] {domain} -> {resolved_ip} blocked at firewall")
 

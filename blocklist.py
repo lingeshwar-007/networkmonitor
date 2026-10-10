@@ -53,6 +53,15 @@ DOMAIN_APP_EXPANSIONS = {
         "threads.net",
         "instagram.c10r.facebook.com",
         "graph.instagram.com",
+        "edge-chat.instagram.com",
+        "b.instagram.com",
+        "api.instagram.com",
+        "gateway.instagram.com",
+        "fbcdn.net",
+        "facebook.com",
+        "facebook.net",
+        "fbsbx.com",
+        "meta.com",
     ],
     "tiktok.com": [
         "tiktokcdn.com",
@@ -70,6 +79,8 @@ DOMAIN_APP_EXPANSIONS = {
         "fb.me",
         "fbsbx.com",
         "messenger.com",
+        "instagram.com",
+        "threads.net",
     ],
     "whatsapp.com": [
         "whatsapp.net",
@@ -125,6 +136,88 @@ DOMAIN_APP_EXPANSIONS = {
     ],
 }
 
+# ==============================================================================
+# Autonomous System / Hard CIDR IP Ranges
+# For major apps (Meta/Instagram, TikTok, Netflix), IP routing can bypass DNS.
+# Dropping their dedicated CIDR IP blocks at Layer 3/4 completely terminates traffic.
+# ==============================================================================
+
+SERVICE_CIDR_BLOCKS = {
+    "instagram.com": [
+        "157.240.0.0/16",
+        "57.144.0.0/14",
+        "31.13.64.0/18",
+        "31.13.24.0/21",
+        "31.13.78.0/24",
+        "31.13.79.0/24",
+        "31.13.80.0/24",
+        "31.13.96.0/19",
+        "179.60.192.0/22",
+        "185.60.216.0/22",
+        "204.15.20.0/22",
+        "69.63.176.0/20",
+        "69.171.224.0/19",
+        "66.220.144.0/20",
+        "129.134.0.0/16",
+        "173.252.64.0/18",
+        "2a03:2880::/32",
+        "2620:0:1c00::/40",
+        "2a03:2884::/32",
+        "2a03:2887::/32",
+    ],
+    "facebook.com": [
+        "157.240.0.0/16",
+        "57.144.0.0/14",
+        "31.13.64.0/18",
+        "31.13.24.0/21",
+        "31.13.78.0/24",
+        "31.13.79.0/24",
+        "31.13.80.0/24",
+        "31.13.96.0/19",
+        "179.60.192.0/22",
+        "185.60.216.0/22",
+        "204.15.20.0/22",
+        "69.63.176.0/20",
+        "69.171.224.0/19",
+        "66.220.144.0/20",
+        "129.134.0.0/16",
+        "173.252.64.0/18",
+        "2a03:2880::/32",
+        "2620:0:1c00::/40",
+        "2a03:2884::/32",
+        "2a03:2887::/32",
+    ],
+    "whatsapp.com": [
+        "157.240.0.0/16",
+        "57.144.0.0/14",
+        "31.13.64.0/18",
+        "185.60.216.0/22",
+        "2a03:2880::/32",
+    ],
+    "tiktok.com": [
+        "161.117.0.0/16",
+        "152.199.19.0/24",
+        "152.199.20.0/24",
+        "143.204.0.0/16",
+    ],
+    "netflix.com": [
+        "198.38.96.0/19",
+        "198.45.48.0/20",
+        "23.246.0.0/18",
+        "37.77.184.0/21",
+        "45.57.0.0/17",
+        "64.120.128.0/17",
+        "66.197.128.0/17",
+        "69.53.224.0/19",
+        "108.175.32.0/20",
+        "185.2.220.0/22",
+        "185.9.188.0/22",
+        "192.173.64.0/18",
+        "2a00:86c0::/32",
+        "2a03:5640::/32",
+    ],
+}
+
 # Inverted index: maps any CDN or alias domain back to its root service
 EXPANSION_TO_ROOT = {}
 for root, alts in DOMAIN_APP_EXPANSIONS.items():
@@ -136,6 +229,22 @@ for root, alts in DOMAIN_APP_EXPANSIONS.items():
 def get_root_service(domain: str) -> str:
     """Return the parent service root domain if this is a known CDN or alternate domain."""
     return EXPANSION_TO_ROOT.get(domain)
+
+
+def get_service_cidrs(domain: str) -> list:
+    """Return published Autonomous System IP CIDR blocks for domain or its root service."""
+    norm = validators.normalize_domain(domain)
+    if norm in SERVICE_CIDR_BLOCKS:
+        return SERVICE_CIDR_BLOCKS[norm]
+    parts = norm.split(".")
+    if len(parts) >= 2:
+        base = ".".join(parts[-2:])
+        if base in SERVICE_CIDR_BLOCKS:
+            return SERVICE_CIDR_BLOCKS[base]
+    root = EXPANSION_TO_ROOT.get(norm)
+    if root and root in SERVICE_CIDR_BLOCKS:
+        return SERVICE_CIDR_BLOCKS[root]
+    return []
 
 
 def get_expanded_domains(domain: str) -> list:
@@ -160,18 +269,52 @@ def get_expanded_domains(domain: str) -> list:
 
 
 def lookup_mac(ip: str) -> str:
-    """Find MAC address for an IP from the system ARP table."""
+    """Find MAC address for an IP from ARP table, ip neighbor, or DHCP lease files."""
+    if not ip:
+        return None
     try:
-        if config.IS_PI or platform.system() != "Linux":
-            pass
         if platform.system() == "Linux":
-            with open("/proc/net/arp", "r") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 4 and parts[0] == ip:
-                        mac = parts[3]
-                        if mac != "00:00:00:00:00:00":
-                            return mac.upper()
+            # 1. Check /proc/net/arp
+            if os.path.exists("/proc/net/arp"):
+                with open("/proc/net/arp", "r") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 4 and parts[0] == ip:
+                            mac = parts[3]
+                            if mac != "00:00:00:00:00:00":
+                                return mac.upper()
+
+            # 2. Check ip neigh show
+            try:
+                out = subprocess.check_output(f"ip neigh show {ip}", shell=True, text=True, stderr=subprocess.DEVNULL)
+                for line in out.splitlines():
+                    match = re.search(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}", line)
+                    if match:
+                        return match.group(0).replace("-", ":").upper()
+            except Exception:
+                pass
+
+            # 3. Check DHCP lease files (NetworkManager & dnsmasq)
+            import glob
+            lease_files = [
+                "/var/lib/NetworkManager/dnsmasq-wlan0.leases",
+                "/var/lib/misc/dnsmasq.leases",
+                "/run/NetworkManager/dnsmasq-wlan0.leases",
+            ]
+            for pattern in ["/var/lib/NetworkManager/dnsmasq-*.leases", "/run/NetworkManager/*.leases"]:
+                lease_files.extend(glob.glob(pattern))
+
+            for path in set(lease_files):
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", errors="ignore") as f:
+                            for line in f:
+                                parts = line.split()
+                                # Format: timestamp mac ip hostname client_id
+                                if len(parts) >= 3 and parts[2] == ip:
+                                    return parts[1].upper()
+                    except Exception:
+                        pass
         else:
             out = subprocess.check_output(f"arp -a {ip}", shell=True, text=True, stderr=subprocess.DEVNULL)
             for line in out.splitlines():
@@ -346,8 +489,14 @@ def enforce_domain_ip(domain: str, ip: str):
 
 
 # ==============================================================================
-# Linux / Raspberry Pi Enforcement (dnsmasq + hostapd + iptables)
+# Linux / Raspberry Pi Gateway Firewall (dnsmasq + NetworkManager + iptables)
 # ==============================================================================
+
+DNSMASQ_DIRS = [
+    "/etc/dnsmasq.d",
+    "/etc/NetworkManager/dnsmasq-shared.d",
+]
+
 
 def _append_dnsmasq_rule(domain: str):
     """Appends address=/domain/0.0.0.0 and :: to dnsmasq config to sinkhole domain and all subdomains."""
@@ -355,42 +504,46 @@ def _append_dnsmasq_rule(domain: str):
         f"address=/{domain}/0.0.0.0\n",
         f"address=/{domain}/::\n",
     ]
-    try:
-        os.makedirs(os.path.dirname(config.DNSMASQ_BLOCKLIST_FILE), exist_ok=True)
-        existing = ""
-        if os.path.exists(config.DNSMASQ_BLOCKLIST_FILE):
-            with open(config.DNSMASQ_BLOCKLIST_FILE, "r") as f:
-                existing = f.read()
-        with open(config.DNSMASQ_BLOCKLIST_FILE, "a") as f:
-            for l in lines:
-                if l not in existing:
-                    f.write(l)
-        _restart_dnsmasq()
-    except Exception as e:
-        print(f"[blocklist] Failed to write dnsmasq rule: {e}")
+    for d in DNSMASQ_DIRS:
+        try:
+            if os.path.exists(d) or d == "/etc/dnsmasq.d":
+                os.makedirs(d, exist_ok=True)
+                filepath = os.path.join(d, "guardspot_blocklist.conf")
+                existing = ""
+                if os.path.exists(filepath):
+                    with open(filepath, "r") as f:
+                        existing = f.read()
+                with open(filepath, "a") as f:
+                    for l in lines:
+                        if l not in existing:
+                            f.write(l)
+        except Exception as e:
+            print(f"[blocklist] Failed to write dnsmasq rule ({d}): {e}")
+    _restart_dnsmasq()
 
 
 def _remove_dnsmasq_rule(domain: str):
-    """Removes domain sinkhole rules from dnsmasq config."""
-    try:
-        if not os.path.exists(config.DNSMASQ_BLOCKLIST_FILE):
-            return
-        with open(config.DNSMASQ_BLOCKLIST_FILE, "r") as f:
-            lines = f.readlines()
-        with open(config.DNSMASQ_BLOCKLIST_FILE, "w") as f:
-            for line in lines:
-                if f"/{domain}/" not in line:
-                    f.write(line)
-        _restart_dnsmasq()
-    except Exception as e:
-        print(f"[blocklist] Failed to remove dnsmasq rule: {e}")
+    """Removes domain sinkhole rules from all dnsmasq configs."""
+    for d in DNSMASQ_DIRS:
+        filepath = os.path.join(d, "guardspot_blocklist.conf")
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, "r") as f:
+                    lines = f.readlines()
+                with open(filepath, "w") as f:
+                    for line in lines:
+                        if f"/{domain}/" not in line:
+                            f.write(line)
+        except Exception as e:
+            print(f"[blocklist] Failed to remove dnsmasq rule ({filepath}): {e}")
+    _restart_dnsmasq()
 
 
 def _restart_dnsmasq():
-    """Reloads dnsmasq to apply blocklist changes without dropping leases."""
-    res = _run_privileged(["sudo", "killall", "-HUP", "dnsmasq"])
-    if not res or res.returncode != 0:
-        _run_privileged(["sudo", "systemctl", "reload", "dnsmasq"])
+    """Reloads dnsmasq and NetworkManager to apply blocklist changes without dropping leases."""
+    _run_privileged(["sudo", "killall", "-HUP", "dnsmasq"])
+    _run_privileged(["sudo", "systemctl", "reload", "dnsmasq"])
+    _run_privileged(["sudo", "systemctl", "reload", "NetworkManager"])
 
 
 def _hostapd_deny_add(mac: str):
@@ -410,8 +563,10 @@ def _hostapd_deny_add(mac: str):
     _run_privileged(["sudo", "hostapd_cli", "deauthenticate", norm_mac])
     _run_privileged(["sudo", "hostapd_cli", "disassociate", norm_mac])
 
-    # Direct Linux kernel station eviction
-    _run_privileged(["sudo", "iw", "dev", config.CAPTURE_INTERFACE, "station", "del", norm_mac])
+    # Direct Linux wireless kernel driver station eviction
+    for iface in ("wlan0", "ap0", config.CAPTURE_INTERFACE):
+        _run_privileged(["sudo", "iw", "dev", iface, "station", "del", norm_mac.lower()])
+        _run_privileged(["sudo", "iw", "dev", iface, "station", "del", norm_mac.upper()])
 
     # Persistent deny files
     for path in ["/etc/hostapd/hostapd.deny", "/etc/hostapd.deny"]:
@@ -455,50 +610,101 @@ def _dnsmasq_deny_add(mac: str):
         return
     norm_mac = mac.upper()
     rule = f"dhcp-host={norm_mac},ignore\n"
-    try:
-        os.makedirs(os.path.dirname(DNSMASQ_DENY_FILE), exist_ok=True)
-        existing = ""
-        if os.path.exists(DNSMASQ_DENY_FILE):
-            with open(DNSMASQ_DENY_FILE, "r") as f:
-                existing = f.read()
-        if rule not in existing:
-            with open(DNSMASQ_DENY_FILE, "a") as f:
-                f.write(rule)
-            _restart_dnsmasq()
-    except Exception as e:
-        print(f"[blocklist] dnsmasq deny write error: {e}")
+    for d in DNSMASQ_DIRS:
+        try:
+            if os.path.exists(d) or d == "/etc/dnsmasq.d":
+                os.makedirs(d, exist_ok=True)
+                filepath = os.path.join(d, "guardspot_deny.conf")
+                existing = ""
+                if os.path.exists(filepath):
+                    with open(filepath, "r") as f:
+                        existing = f.read()
+                if rule not in existing:
+                    with open(filepath, "a") as f:
+                        f.write(rule)
+        except Exception as e:
+            print(f"[blocklist] dnsmasq deny write error ({d}): {e}")
+    _restart_dnsmasq()
 
 
 def _dnsmasq_deny_remove(mac: str):
     """Restores DHCP service for this MAC."""
-    if not mac or not os.path.exists(DNSMASQ_DENY_FILE):
+    if not mac:
         return
     norm_mac = mac.upper()
-    try:
-        with open(DNSMASQ_DENY_FILE, "r") as f:
-            lines = f.readlines()
-        with open(DNSMASQ_DENY_FILE, "w") as f:
-            for line in lines:
-                if norm_mac not in line.upper():
-                    f.write(line)
-        _restart_dnsmasq()
-    except Exception as e:
-        print(f"[blocklist] dnsmasq deny remove error: {e}")
+    for d in DNSMASQ_DIRS:
+        filepath = os.path.join(d, "guardspot_deny.conf")
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, "r") as f:
+                    lines = f.readlines()
+                with open(filepath, "w") as f:
+                    for line in lines:
+                        if norm_mac not in line.upper():
+                            f.write(line)
+        except Exception as e:
+            print(f"[blocklist] dnsmasq deny remove error ({filepath}): {e}")
+    _restart_dnsmasq()
 
 
-def _add_iptables_drop(ip: str):
-    """Insert DROP rule at position 1 to precede RELATED,ESTABLISHED."""
-    _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-s", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-I", "OUTPUT", "1", "-d", ip, "-j", "DROP"])
-    # Terminate active TCP/UDP sessions immediately so video streams halt
-    _run_privileged(["sudo", "conntrack", "-D", "-d", ip])
+def _add_iptables_drop(ip_or_cidr: str):
+    """Insert DROP rule at position 1 to precede RELATED,ESTABLISHED (supports IPv4, IPv6, and CIDRs)."""
+    tool = "ip6tables" if ":" in ip_or_cidr else "iptables"
+    check = _run_privileged(["sudo", tool, "-C", "FORWARD", "-d", ip_or_cidr, "-j", "DROP"])
+    if not check or check.returncode != 0:
+        _run_privileged(["sudo", tool, "-I", "FORWARD", "1", "-d", ip_or_cidr, "-j", "DROP"])
+        _run_privileged(["sudo", tool, "-I", "FORWARD", "1", "-s", ip_or_cidr, "-j", "DROP"])
+        _run_privileged(["sudo", tool, "-I", "OUTPUT", "1", "-d", ip_or_cidr, "-j", "DROP"])
+    # Terminate active TCP/UDP sessions immediately so video/feed streams halt
+    if "/" not in ip_or_cidr:
+        _run_privileged(["sudo", "conntrack", "-D", "-d", ip_or_cidr])
+        _run_privileged(["sudo", "conntrack", "-D", "-s", ip_or_cidr])
+    else:
+        _run_privileged(["sudo", "conntrack", "-F"])
 
 
-def _remove_iptables_drop(ip: str):
-    _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-d", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-D", "OUTPUT", "-d", ip, "-j", "DROP"])
+def _remove_iptables_drop(ip_or_cidr: str):
+    tool = "ip6tables" if ":" in ip_or_cidr else "iptables"
+    _run_privileged(["sudo", tool, "-D", "FORWARD", "-d", ip_or_cidr, "-j", "DROP"])
+    _run_privileged(["sudo", tool, "-D", "FORWARD", "-s", ip_or_cidr, "-j", "DROP"])
+    _run_privileged(["sudo", tool, "-D", "OUTPUT", "-d", ip_or_cidr, "-j", "DROP"])
+
+
+def init_gateway_firewall():
+    """
+    Initializes Raspberry Pi / Linux gateway firewall foundations:
+    1. Enables IP packet forwarding in sysctl.
+    2. Hijacks DNS (port 53 UDP/TCP) in PREROUTING to redirect all external DNS queries to local sinkhole.
+    3. Blocks DNS-over-TLS (port 853) on IPv4 & IPv6 with TCP reset so clients fall back to port 53.
+    """
+    if IS_WINDOWS:
+        return
+
+    # 1. Enable IP forwarding
+    _run_privileged(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"])
+    _run_privileged(["sudo", "sysctl", "-w", "net.ipv6.conf.all.forwarding=1"])
+
+    # 2. Intercept Port 53 DNS so clients cannot query external DNS (8.8.8.8, 1.1.1.1, etc.)
+    check_udp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+    if not check_udp or check_udp.returncode != 0:
+        _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+
+    check_tcp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+    if not check_tcp or check_tcp.returncode != 0:
+        _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
+
+    # 3. Block DNS-over-TLS (port 853) on IPv4 and IPv6 so mobile Private DNS falls back to port 53
+    check_dot_v4 = _run_privileged(["sudo", "iptables", "-C", "FORWARD", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
+    if not check_dot_v4 or check_dot_v4.returncode != 0:
+        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
+        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
+
+    check_dot_v6 = _run_privileged(["sudo", "ip6tables", "-C", "FORWARD", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
+    if not check_dot_v6 or check_dot_v6.returncode != 0:
+        _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
+        _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
+
+    print("[firewall] Gateway firewall initialized: IP forwarding ON, DNS redirected to local sinkhole, DoT blocked.")
 
 
 # ==============================================================================
@@ -506,7 +712,7 @@ def _remove_iptables_drop(ip: str):
 # ==============================================================================
 
 def enforce_block(value: str, entry_type: str):
-    """Push a block rule down to the OS and firewalls."""
+    """Push a block rule down to the OS and gateway firewalls."""
     if entry_type == "ip":
         if IS_WINDOWS:
             _windows_add_ip_rule(f"GuardSpot_Block_IP_{value}", value)
@@ -515,9 +721,19 @@ def enforce_block(value: str, entry_type: str):
         return
 
     # entry_type == "domain"
-    # Expand to all associated CDNs and streaming endpoints
+    # 1. Expand to all associated CDNs and streaming endpoints
     expanded_domains = get_expanded_domains(value)
 
+    # 2. Block well-known service CIDR blocks (e.g. Meta AS32934 for Instagram/Facebook)
+    cidrs = get_service_cidrs(value)
+    safe_val = re.sub(r'[^a-zA-Z0-9.-]', '_', value)
+    for cidr in cidrs:
+        if IS_WINDOWS:
+            _windows_add_ip_rule(f"GuardSpot_CIDR_{safe_val}_{cidr.replace('/', '_').replace(':', '_')}", cidr)
+        else:
+            _add_iptables_drop(cidr)
+
+    # 3. Sinkhole each expanded domain in dnsmasq and resolve dynamic IPs
     for dom in expanded_domains:
         safe_domain = re.sub(r'[^a-zA-Z0-9.-]', '_', dom)
         ips = resolve_domain_ips(dom)
@@ -529,9 +745,10 @@ def enforce_block(value: str, entry_type: str):
             _append_dnsmasq_rule(dom)
             for ip in ips:
                 _add_iptables_drop(ip)
-            # Prevent devices from bypassing hotspot DNS with Private DNS (DNS-over-TLS port 853)
-            _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "DROP"])
-            _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
+
+    # 4. Flush active connections so open streams/apps die instantly
+    if not IS_WINDOWS:
+        _run_privileged(["sudo", "conntrack", "-F"])
 
 
 def unenforce_block(value: str, entry_type: str):
@@ -544,6 +761,16 @@ def unenforce_block(value: str, entry_type: str):
         return
 
     # entry_type == "domain"
+    # 1. Remove CIDR blocks
+    cidrs = get_service_cidrs(value)
+    safe_val = re.sub(r'[^a-zA-Z0-9.-]', '_', value)
+    for cidr in cidrs:
+        if IS_WINDOWS:
+            _windows_remove_rules(f"GuardSpot_CIDR_{safe_val}_{cidr.replace('/', '_').replace(':', '_')}")
+        else:
+            _remove_iptables_drop(cidr)
+
+    # 2. Remove domain sinkhole & IP drops
     expanded_domains = get_expanded_domains(value)
     for dom in expanded_domains:
         safe_dom = re.sub(r'[^a-zA-Z0-9.-]', '_', dom)
@@ -567,7 +794,7 @@ def block_device(ip: str, mac: str = None):
     1. Layer 2 Wi-Fi Rejection: Adds MAC to hostapd deny ACL, deauthenticates, and evicts station.
        The device cannot re-associate or connect to the Wi-Fi.
     2. DHCP Rejection: Tells dnsmasq to ignore DHCP requests from this MAC.
-    3. Layer 3 Firewall Dropping: Drops all incoming and outgoing packets (TCP, UDP, ICMP).
+    3. Layer 3/4 Firewall Dropping: Drops all incoming and outgoing packets (IPv4 and IPv6) by IP and MAC.
     4. Active Connection Killing: Kills conntrack sessions on Linux, flushes ARP on Windows.
     """
     if not mac:
@@ -582,29 +809,35 @@ def block_device(ip: str, mac: str = None):
         _run_privileged(["netsh", "interface", "ip", "delete", "arpcache"])
         return
 
-    # Linux / Raspberry Pi (Wi-Fi Access Point or Ethernet)
+    # Linux / Raspberry Pi Gateway Firewall
     # 1. Kill active connection states immediately
     _run_privileged(["sudo", "conntrack", "-D", "-s", ip])
     _run_privileged(["sudo", "conntrack", "-D", "-d", ip])
 
-    # 2. Firewall IP packet dropping at top of chains
+    # 2. Firewall IP packet dropping at top of chains (IPv4)
     _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-s", ip, "-j", "DROP"])
     _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "DROP"])
     _run_privileged(["sudo", "iptables", "-I", "INPUT", "1", "-s", ip, "-j", "DROP"])
     _run_privileged(["sudo", "iptables", "-I", "OUTPUT", "1", "-d", ip, "-j", "DROP"])
 
     if mac:
-        # 3. Firewall MAC packet dropping
-        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-m", "mac", "--mac-source", mac, "-j", "DROP"])
-        _run_privileged(["sudo", "iptables", "-I", "INPUT", "1", "-m", "mac", "--mac-source", mac, "-j", "DROP"])
+        norm_mac = mac.upper()
+        # 3. Firewall MAC packet dropping on both IPv4 and IPv6
+        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _run_privileged(["sudo", "iptables", "-I", "INPUT", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _run_privileged(["sudo", "ip6tables", "-I", "INPUT", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
 
-        # 4. Layer 2 Wi-Fi Rejection: kick client from wlan0 driver and add to hostapd deny
-        _run_privileged(["sudo", "iw", "dev", "wlan0", "station", "del", mac.lower()])
-        _run_privileged(["sudo", "iw", "dev", "wlan0", "station", "del", mac.upper()])
-        _hostapd_deny_add(mac)
+        # 4. Layer 2 Wi-Fi Rejection: kick client from wireless driver (wlan0)
+        for iface in ("wlan0", "ap0", config.CAPTURE_INTERFACE):
+            _run_privileged(["sudo", "iw", "dev", iface, "station", "del", norm_mac.lower()])
+            _run_privileged(["sudo", "iw", "dev", iface, "station", "del", norm_mac.upper()])
+
+        # hostapd deny
+        _hostapd_deny_add(norm_mac)
 
         # 5. DHCP Rejection: refuse to assign IP address to this MAC
-        _dnsmasq_deny_add(mac)
+        _dnsmasq_deny_add(norm_mac)
 
 
 def unblock_device(ip: str, mac: str = None):
@@ -625,9 +858,10 @@ def unblock_device(ip: str, mac: str = None):
     _run_privileged(["sudo", "iptables", "-D", "OUTPUT", "-d", ip, "-j", "DROP"])
 
     if mac:
-        _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-m", "mac", "--mac-source", mac, "-j", "DROP"])
-        _run_privileged(["sudo", "iptables", "-D", "INPUT", "-m", "mac", "--mac-source", mac, "-j", "DROP"])
-        # Remove from hostapd deny list
-        _hostapd_deny_remove(mac)
-        # Remove from dnsmasq DHCP ignore list
-        _dnsmasq_deny_remove(mac)
+        norm_mac = mac.upper()
+        _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _run_privileged(["sudo", "iptables", "-D", "INPUT", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _run_privileged(["sudo", "ip6tables", "-D", "FORWARD", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _run_privileged(["sudo", "ip6tables", "-D", "INPUT", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
+        _hostapd_deny_remove(norm_mac)
+        _dnsmasq_deny_remove(norm_mac)

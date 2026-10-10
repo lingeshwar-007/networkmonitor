@@ -336,6 +336,31 @@ import sys
 import os
 
 
+def free_port(port: int):
+    """Ensure port is available on Linux by stopping stale GuardSpot/Flask instances."""
+    if platform.system() == "Linux":
+        curr_pid = os.getpid()
+        try:
+            res = subprocess.run(["fuser", f"{port}/tcp"], capture_output=True, text=True)
+            pids = [int(p.strip()) for p in res.stdout.strip().split() if p.strip().isdigit()]
+            for p in pids:
+                if p != curr_pid:
+                    subprocess.run(["kill", "-9", str(p)], check=False)
+        except Exception:
+            pass
+        try:
+            out = subprocess.check_output(f"lsof -ti:{port}", shell=True, text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                if line.strip().isdigit():
+                    p = int(line.strip())
+                    if p != curr_pid:
+                        subprocess.run(["kill", "-9", str(p)], check=False)
+        except Exception:
+            pass
+        import time
+        time.sleep(0.5)
+
+
 def auto_start_sniffer():
     """Automatically starts the background packet sniffer so you only ever have to run app.py."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -367,7 +392,29 @@ def auto_start_sniffer():
 
 
 if __name__ == "__main__":
+    if platform.system() == "Linux" and hasattr(os, "geteuid") and os.geteuid() != 0:
+        print("\n" + "=" * 65)
+        print(" [!] NOTICE: For full gateway firewall functionality (iptables drop,")
+        print("     DNS redirection, Wi-Fi kick), run GuardSpot as root:")
+        print("         sudo python3 app.py")
+        print("=" * 65 + "\n")
+
+    free_port(config.PORT)
+    blocklist_module.init_gateway_firewall()
     auto_start_sniffer()
+
     app = create_app()
+    with app.app_context():
+        try:
+            entries = BlockedEntry.query.all()
+            for entry in entries:
+                blocklist_module.enforce_block(entry.value, entry.entry_type)
+            devices = Device.query.filter_by(is_blocked=True).all()
+            for dev in devices:
+                blocklist_module.block_device(dev.ip_address, dev.mac_address)
+            print(f"[GuardSpot Firewall] Active: {len(entries)} blocklist rules & {len(devices)} blocked devices enforced.")
+        except Exception as e:
+            print(f"[GuardSpot Firewall] Sync notice: {e}")
+
     debug_mode = config.__dict__.get("DEBUG", False)
     app.run(host=config.HOST, port=config.PORT, debug=debug_mode)
