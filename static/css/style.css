@@ -537,41 +537,61 @@ body {
   border-color: #dc2626;
 }
 
-/* ---- Quick App Blocker Pills ---- */
-.quick-app-pills {
+/* ---- Most Visited on Network List ---- */
+.most-used-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.most-used-item {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
   align-items: center;
-  margin-top: 10px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #2a374c;
 }
 
-.quick-app-label {
-  font-size: 0.72rem;
+.most-used-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.most-used-domain {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.most-used-hits {
+  font-size: 0.70rem;
   color: var(--muted);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  width: 100%;
-  margin-bottom: 2px;
 }
 
-.quick-app-pill {
+.most-used-block-btn {
   background: #182230;
   border: 1px solid var(--line);
-  color: var(--ink);
-  font-size: 0.74rem;
-  font-weight: 600;
-  padding: 5px 9px;
-  border-radius: 5px;
+  color: #ff6b6b;
+  border-radius: 4px;
+  padding: 4px 10px;
   cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 600;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
-.quick-app-pill:hover {
-  background: var(--red-dim);
+.most-used-block-btn:hover {
+  background: var(--red);
   border-color: var(--red);
-  color: var(--red);
+  color: #fff;
 }
 
 #blocklist-items { list-style: none; margin: 10px 0 0; padding: 0; }

@@ -139,6 +139,80 @@ async function loadBlocklist() {
   }
 }
 
+async function loadMostUsed() {
+  try {
+    const list = document.getElementById("most-used-items");
+    if (!list) return;
+    const [items, activeBlocklist] = await Promise.all([
+      fetchJSON("/api/most-used"),
+      fetchJSON("/api/blocklist")
+    ]);
+    list.innerHTML = "";
+
+    if (!items || items.length === 0) {
+      list.innerHTML = '<li class="muted">No activity yet</li>';
+      return;
+    }
+
+    const blockedDomainValues = new Set(
+      activeBlocklist.filter(b => b.entry_type === "domain").map(b => b.value.toLowerCase())
+    );
+
+    function isDomainBlocked(domain) {
+      const clean = domain.toLowerCase().replace(/^\.+|\.+$/g, "");
+      const parts = clean.split(".");
+      for (let i = 0; i < parts.length - 1; i++) {
+        const parent = parts.slice(i).join(".");
+        if (blockedDomainValues.has(parent)) return true;
+      }
+      return false;
+    }
+
+    items.forEach(item => {
+      const isBlocked = isDomainBlocked(item.domain);
+      const li = document.createElement("li");
+      li.className = "most-used-item";
+      li.innerHTML = `
+        <div class="most-used-info">
+          <span class="most-used-domain" title="${item.domain}">${item.domain}</span>
+          <span class="most-used-hits">${item.hits} request${item.hits === 1 ? '' : 's'}</span>
+        </div>
+        ${isBlocked
+          ? `<span class="badge blocked">blocked</span>`
+          : `<button class="most-used-block-btn" data-domain="${item.domain}">Block</button>`}
+      `;
+
+      const btn = li.querySelector(".most-used-block-btn");
+      if (btn) {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = "Blocking...";
+          try {
+            await fetchJSON("/api/blocklist", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                value: item.domain,
+                entry_type: "domain",
+                reason: "Blocked from Most Visited list"
+              })
+            });
+            refreshAll();
+          } catch (err) {
+            alert(`Failed to block ${item.domain}: ${err.message}`);
+            btn.disabled = false;
+            btn.textContent = "Block";
+          }
+        };
+      }
+
+      list.appendChild(li);
+    });
+  } catch (err) {
+    console.error("Error loading most used:", err);
+  }
+}
+
 async function loadAuditLog() {
   try {
     const entries = await fetchJSON("/api/audit-log?limit=30");
@@ -328,6 +402,7 @@ function refreshAll() {
   loadStats();
   loadDevices();
   loadBlocklist();
+  loadMostUsed();
   loadAuditLog();
 }
 

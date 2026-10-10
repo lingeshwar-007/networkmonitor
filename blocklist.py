@@ -230,17 +230,23 @@ SERVICE_CIDR_BLOCKS = {
     ],
 }
 
-# Inverted index: maps any CDN or alias domain back to its root service
-EXPANSION_TO_ROOT = {}
+# Inverted index: maps any CDN or alias domain back to all parent root services
+EXPANSION_TO_ROOTS = {}
 for root, alts in DOMAIN_APP_EXPANSIONS.items():
-    EXPANSION_TO_ROOT[root] = root
+    EXPANSION_TO_ROOTS.setdefault(root, set()).add(root)
     for alt in alts:
-        EXPANSION_TO_ROOT[alt] = root
+        EXPANSION_TO_ROOTS.setdefault(alt, set()).add(root)
 
 
 def get_root_service(domain: str) -> str:
     """Return the parent service root domain if this is a known CDN or alternate domain."""
-    return EXPANSION_TO_ROOT.get(domain)
+    roots = EXPANSION_TO_ROOTS.get(domain)
+    return next(iter(roots)) if roots else None
+
+
+def get_root_services(domain: str) -> list:
+    """Return all parent service root domains for a given CDN or alternate domain."""
+    return list(EXPANSION_TO_ROOTS.get(domain, set()))
 
 
 def get_service_cidrs(domain: str) -> list:
@@ -253,9 +259,9 @@ def get_service_cidrs(domain: str) -> list:
         base = ".".join(parts[-2:])
         if base in SERVICE_CIDR_BLOCKS:
             return SERVICE_CIDR_BLOCKS[base]
-    root = EXPANSION_TO_ROOT.get(norm)
-    if root and root in SERVICE_CIDR_BLOCKS:
-        return SERVICE_CIDR_BLOCKS[root]
+    for r in get_root_services(norm):
+        if r in SERVICE_CIDR_BLOCKS:
+            return SERVICE_CIDR_BLOCKS[r]
     return []
 
 
@@ -274,9 +280,9 @@ def get_expanded_domains(domain: str) -> list:
         if base in DOMAIN_APP_EXPANSIONS:
             return list(set([base, norm] + DOMAIN_APP_EXPANSIONS[base]))
 
-    root = EXPANSION_TO_ROOT.get(norm)
-    if root and root in DOMAIN_APP_EXPANSIONS:
-        return list(set([root, norm] + DOMAIN_APP_EXPANSIONS[root]))
+    for r in get_root_services(norm):
+        if r in DOMAIN_APP_EXPANSIONS:
+            return list(set([r, norm] + DOMAIN_APP_EXPANSIONS[r]))
     return [norm]
 
 
@@ -348,17 +354,17 @@ def is_blocked(domain: str, resolved_ip: str = None) -> bool:
         return False
 
     if domain:
-        clean_domain = validators.normalize_domain(domain)
+        clean_domain = validators.normalize_domain(domain).lower()
         parts = clean_domain.split(".")
 
-        # Generate candidates: e.g. for "v16.api.tiktok.com" ->
-        # ["v16.api.tiktok.com", "api.tiktok.com", "tiktok.com"]
+        # 1. Candidate suffixes: e.g. for "instagram.fmaa1-2.fna.fbcdn.net" ->
+        # ["instagram.fmaa1-2.fna.fbcdn.net", "fmaa1-2.fna.fbcdn.net", "fna.fbcdn.net", "fbcdn.net"]
         candidates = []
         for i in range(len(parts) - 1):
             candidates.append(".".join(parts[i:]))
 
         if candidates:
-            # 1. Direct candidate matching
+            # Check direct candidate matching in DB
             match = BlockedEntry.query.filter(
                 BlockedEntry.entry_type == "domain",
                 BlockedEntry.value.in_(candidates)
@@ -366,20 +372,50 @@ def is_blocked(domain: str, resolved_ip: str = None) -> bool:
             if match:
                 return True
 
-            # 2. Service family expansion check (e.g. googlevideo.com -> youtube.com)
-            root_candidates = []
+            # 2. Service family expansion check (maps fbcdn.net -> {"instagram.com", "facebook.com"})
+            root_candidates = set()
             for c in candidates:
-                root = get_root_service(c)
-                if root and root not in root_candidates:
-                    root_candidates.append(root)
+                for r in get_root_services(c):
+                    root_candidates.add(r)
 
             if root_candidates:
                 match_root = BlockedEntry.query.filter(
                     BlockedEntry.entry_type == "domain",
-                    BlockedEntry.value.in_(root_candidates)
+                    BlockedEntry.value.in_(list(root_candidates))
                 ).first()
                 if match_root:
                     return True
+
+        # 3. Direct active rule pattern matching:
+        # If instagram.com or insta.com is blocked in the database:
+        # Any domain containing "instagram", "cdninstagram", or ending in fbcdn.net / threads.net / ig.me / edge-mqtt.facebook.com is BLOCKED!
+        try:
+            active_domain_blocks = [e.value.lower() for e in BlockedEntry.query.filter_by(entry_type="domain").all()]
+            for blocked_val in active_domain_blocks:
+                if blocked_val in ("instagram.com", "insta.com"):
+                    if (
+                        "instagram" in clean_domain
+                        or "cdninstagram" in clean_domain
+                        or clean_domain.startswith("insta.")
+                        or clean_domain.startswith("i.insta.")
+                        or clean_domain.endswith(".fbcdn.net")
+                        or clean_domain == "fbcdn.net"
+                        or clean_domain.endswith(".threads.net")
+                        or clean_domain.endswith(".ig.me")
+                        or "edge-mqtt.facebook.com" in clean_domain
+                    ):
+                        return True
+                elif blocked_val == "youtube.com":
+                    if "googlevideo.com" in clean_domain or "ytimg.com" in clean_domain or "youtu.be" in clean_domain:
+                        return True
+                elif blocked_val == "tiktok.com":
+                    if "tiktokcdn" in clean_domain or "byteoversea" in clean_domain or "ibytedtos" in clean_domain or "tiktokv" in clean_domain:
+                        return True
+                elif blocked_val == "facebook.com":
+                    if "fbcdn.net" in clean_domain or "fbsbx.com" in clean_domain or "facebook.net" in clean_domain or "fb.me" in clean_domain:
+                        return True
+        except Exception:
+            pass
 
     if resolved_ip:
         match_ip = BlockedEntry.query.filter_by(value=resolved_ip, entry_type="ip").first()

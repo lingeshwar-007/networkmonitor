@@ -308,6 +308,21 @@ def register_routes(app, limiter):
         log_action(session.get("username", "admin"), f"UNBLOCK_WEBSITE:{value}")
         return jsonify({"success": True})
 
+    @app.route("/api/most-used")
+    @login_required
+    def api_most_used():
+        db.session.expire_all()
+        from sqlalchemy import func
+        top = (
+            db.session.query(ActivityLog.domain, func.count(ActivityLog.id).label("hits"))
+            .filter(ActivityLog.domain.isnot(None), ActivityLog.domain != "")
+            .group_by(ActivityLog.domain)
+            .order_by(func.count(ActivityLog.id).desc())
+            .limit(6)
+            .all()
+        )
+        return jsonify([{"domain": row[0], "hits": row[1]} for row in top])
+
     @app.route("/api/audit-log")
     @login_required
     def api_audit_log():

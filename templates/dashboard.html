@@ -105,15 +105,10 @@
         <input type="text" id="block-value" placeholder="e.g. instagram.com, youtube.com" required>
         <button type="submit">Block</button>
       </form>
-      <div class="quick-app-pills">
-        <span class="quick-app-label">Quick App Blocker:</span>
-        <button type="button" class="quick-app-pill" data-app="instagram.com">📷 Instagram App</button>
-        <button type="button" class="quick-app-pill" data-app="youtube.com">▶️ YouTube App</button>
-        <button type="button" class="quick-app-pill" data-app="tiktok.com">🎵 TikTok App</button>
-        <button type="button" class="quick-app-pill" data-app="facebook.com">👥 Facebook</button>
-        <button type="button" class="quick-app-pill" data-app="whatsapp.com">💬 WhatsApp</button>
-        <button type="button" class="quick-app-pill" data-app="netflix.com">🎬 Netflix</button>
-      </div>
+      <div class="panel-head sub-head"><h3>Most Visited on Network</h3></div>
+      <ul id="most-used-items" class="most-used-list">
+        <li class="muted">Loading activity…</li>
+      </ul>
       <div class="panel-head sub-head"><h3>Active Block Rules</h3></div>
       <ul id="blocklist-items"><li class="muted">No rules yet</li></ul>
     </section>
@@ -154,17 +149,5 @@
   </div>
 </div>
 
-<script src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.2"></script>
-<script>
-  document.querySelectorAll(".quick-app-pill").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const appDomain = btn.getAttribute("data-app");
-      const input = document.getElementById("block-value");
-      if (input && appDomain) {
-        input.value = appDomain;
-        document.getElementById("block-form").dispatchEvent(new Event("submit", { cancelable: true }));
-      }
-    });
-  });
-</script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}?v=2.3"></script>
 {% endblock %}
