@@ -252,6 +252,9 @@ def remove_block(entry_id: int, db=None):
 def _run_privileged(cmd: list):
     """Run a command that needs root/admin. Never crashes Flask."""
     try:
+        # If running as root on Linux, strip 'sudo' so it executes directly without TTY checks
+        if platform.system() == "Linux" and os.geteuid() == 0 and cmd and cmd[0] == "sudo":
+            cmd = cmd[1:]
         result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
         if result.returncode != 0 and result.stderr:
             print(f"[blocklist] command notice ({result.returncode}): {' '.join(cmd)}\n{result.stderr.strip()}")
@@ -580,7 +583,9 @@ def block_device(ip: str, mac: str = None):
         _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-m", "mac", "--mac-source", mac, "-j", "DROP"])
         _run_privileged(["sudo", "iptables", "-I", "INPUT", "1", "-m", "mac", "--mac-source", mac, "-j", "DROP"])
 
-        # 4. Layer 2 Wi-Fi Rejection: deauth + add to hostapd deny list so reconnection fails
+        # 4. Layer 2 Wi-Fi Rejection: kick client from wlan0 driver and add to hostapd deny
+        _run_privileged(["sudo", "iw", "dev", "wlan0", "station", "del", mac.lower()])
+        _run_privileged(["sudo", "iw", "dev", "wlan0", "station", "del", mac.upper()])
         _hostapd_deny_add(mac)
 
         # 5. DHCP Rejection: refuse to assign IP address to this MAC
