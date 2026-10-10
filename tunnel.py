@@ -100,17 +100,33 @@ def resolve_pi_host(host_or_ip: str = "guardspot") -> str:
     return target
 
 
+import time
+
+
 def ensure_remote_services(client):
-    """Ensure sniffer.py and the web app are actively running on the Raspberry Pi."""
+    """Ensure both sniffer.py and app.py are actively running on the Raspberry Pi."""
+    # 1. Ensure sniffer.py is running on the Pi
     try:
-        # Check if sniffer is already running; if not, launch it
         _, stdout, _ = client.exec_command("pgrep -f sniffer.py")
         if not stdout.read().strip():
             client.exec_command(
                 "nohup sudo python3 ~/Downloads/networkmonitor/sniffer.py > /tmp/sniffer.log 2>&1 &"
             )
-    except Exception:
-        pass
+            print("[GuardSpot] Remote packet sniffer started on Raspberry Pi.")
+    except Exception as e:
+        print(f"[GuardSpot] Notice: Could not start remote sniffer: {e}")
+
+    # 2. Ensure app.py is running on the Pi (for the SSH tunnel port 5050 -> 5000)
+    try:
+        _, stdout, _ = client.exec_command("pgrep -f 'python3 app.py'")
+        if not stdout.read().strip():
+            client.exec_command(
+                "nohup python3 ~/Downloads/networkmonitor/app.py > /tmp/app.log 2>&1 &"
+            )
+            print("[GuardSpot] Remote web dashboard started on Raspberry Pi.")
+            time.sleep(2)  # Give Flask 2 seconds to bind port 5000
+    except Exception as e:
+        print(f"[GuardSpot] Notice: Could not start remote app: {e}")
 
 
 def connect_ssh(pi_ip, ssh_username, password=None, key_path=None, ssh_port=22):

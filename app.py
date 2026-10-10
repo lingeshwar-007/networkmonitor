@@ -169,6 +169,8 @@ def register_routes(app, limiter):
                             start_forward(config.TUNNEL_LOCAL_PORT, "127.0.0.1", config.PORT, transport)
                         except Exception:
                             pass
+                        import time
+                        time.sleep(1.0)
                         return redirect(f"http://localhost:{config.TUNNEL_LOCAL_PORT}/")
 
                     client.close()
@@ -328,7 +330,44 @@ def register_routes(app, limiter):
         })
 
 
+import platform
+import subprocess
+import sys
+import os
+
+
+def auto_start_sniffer():
+    """Automatically starts the background packet sniffer so you only ever have to run app.py."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    sniffer_path = os.path.join(base_dir, "sniffer.py")
+
+    if platform.system() == "Linux":
+        try:
+            res = subprocess.run(["pgrep", "-f", "sniffer.py"], capture_output=True, text=True)
+            if not res.stdout.strip():
+                cmd = ["sudo", sys.executable, sniffer_path] if os.geteuid() != 0 else [sys.executable, sniffer_path]
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                print("[GuardSpot] Background packet sniffer started on Linux/Pi.")
+        except Exception as e:
+            print(f"[GuardSpot] Notice: Could not auto-start sniffer: {e}")
+
+    elif platform.system() == "Windows":
+        try:
+            out = subprocess.check_output('wmic process where "commandline like \'%sniffer.py%\'" get processid', shell=True).decode(errors="ignore")
+            pids = [p.strip() for p in out.splitlines() if p.strip().isdigit()]
+            if not pids:
+                subprocess.Popen([sys.executable, sniffer_path], creationflags=subprocess.CREATE_NO_WINDOW)
+                print("[GuardSpot] Background packet sniffer started on Windows.")
+        except Exception:
+            try:
+                subprocess.Popen([sys.executable, sniffer_path], creationflags=subprocess.CREATE_NO_WINDOW)
+                print("[GuardSpot] Background packet sniffer started on Windows.")
+            except Exception as e:
+                print(f"[GuardSpot] Notice: Could not auto-start sniffer: {e}")
+
+
 if __name__ == "__main__":
+    auto_start_sniffer()
     app = create_app()
     debug_mode = config.__dict__.get("DEBUG", False)
     app.run(host=config.HOST, port=config.PORT, debug=debug_mode)
