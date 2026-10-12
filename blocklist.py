@@ -21,9 +21,10 @@ import subprocess
 import platform
 import socket
 import re
-from models import BlockedEntry
+from models import BlockedEntry, Device
 import validators
 import config
+import firewall
 
 IS_WINDOWS = platform.system() == "Windows"
 DNSMASQ_DENY_FILE = "/etc/dnsmasq.d/guardspot_deny.conf"
@@ -447,17 +448,22 @@ def remove_block(entry_id: int, db=None):
     """Admin removes a domain/IP from the blocklist and lifts the OS enforcement."""
     entry = BlockedEntry.query.get(entry_id)
     if entry:
-        unenforce_block(entry.value, entry.entry_type)
+        value, entry_type = entry.value, entry.entry_type
         db.session.delete(entry)
         db.session.commit()
+        # Rules are rebuilt from the database, so un-enforce AFTER the row is gone.
+        unenforce_block(value, entry_type)
 
 
 def _run_privileged(cmd: list):
     """Run a command that needs root/admin. Never crashes Flask."""
     try:
         # If running as root on Linux, strip 'sudo' so it executes directly without TTY checks
-        if platform.system() == "Linux" and os.geteuid() == 0 and cmd and cmd[0] == "sudo":
-            cmd = cmd[1:]
+        if platform.system() == "Linux" and cmd and cmd[0] == "sudo":
+            if os.geteuid() == 0:
+                cmd = cmd[1:]
+            elif "-n" not in cmd[:2]:
+                cmd = ["sudo", "-n"] + cmd[1:]  # never block waiting for a password prompt
         result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
         if result.returncode != 0 and result.stderr:
             print(f"[blocklist] command notice ({result.returncode}): {' '.join(cmd)}\n{result.stderr.strip()}")
@@ -532,70 +538,24 @@ def resolve_domain_ips(domain: str) -> list:
 
 
 def enforce_domain_ip(domain: str, ip: str):
-    """Called when an IP for a blocked domain is detected in live traffic."""
-    safe_domain = re.sub(r'[^a-zA-Z0-9.-]', '_', domain)
+    """Called when an IP for a blocked domain is detected in live traffic (Windows only).
+
+    On the Linux gateway this is intentionally a no-op: the DNS sinkhole and the
+    SNI/Host match already stop the site, while dropping the resolved IP of a site
+    on shared CDN / Google / Cloudflare address space would also knock out
+    unrelated sites that happen to share that IP.
+    """
     if IS_WINDOWS:
+        safe_domain = re.sub(r'[^a-zA-Z0-9.-]', '_', domain)
         _windows_add_ip_rule(f"GuardSpot_DomainIP_{safe_domain}_{ip}", ip)
-    else:
-        _add_iptables_drop(ip)
 
 
 # ==============================================================================
-# Linux / Raspberry Pi Gateway Firewall (dnsmasq + NetworkManager + iptables)
+# Linux / Raspberry Pi Gateway Firewall
+# All real enforcement lives in firewall.py. The database is the source of truth:
+# after ANY change we rebuild the complete rule set from it (sync_firewall), so
+# rules can never drift out of sync with what the dashboard shows.
 # ==============================================================================
-
-DNSMASQ_DIRS = [
-    "/etc/dnsmasq.d",
-    "/etc/NetworkManager/dnsmasq-shared.d",
-]
-
-
-def _append_dnsmasq_rule(domain: str):
-    """Appends address=/domain/0.0.0.0 and :: to dnsmasq config to sinkhole domain and all subdomains."""
-    lines = [
-        f"address=/{domain}/0.0.0.0\n",
-        f"address=/{domain}/::\n",
-    ]
-    for d in DNSMASQ_DIRS:
-        try:
-            if os.path.exists(d):
-                filepath = os.path.join(d, "guardspot_blocklist.conf")
-                existing = ""
-                if os.path.exists(filepath):
-                    with open(filepath, "r") as f:
-                        existing = f.read()
-                with open(filepath, "a") as f:
-                    for l in lines:
-                        if l not in existing:
-                            f.write(l)
-        except Exception as e:
-            print(f"[blocklist] Failed to write dnsmasq rule ({d}): {e}")
-
-
-def _remove_dnsmasq_rule(domain: str):
-    """Removes domain sinkhole rules from all dnsmasq configs."""
-    for d in DNSMASQ_DIRS:
-        filepath = os.path.join(d, "guardspot_blocklist.conf")
-        try:
-            if os.path.exists(filepath):
-                with open(filepath, "r") as f:
-                    lines = f.readlines()
-                with open(filepath, "w") as f:
-                    for line in lines:
-                        if f"/{domain}/" not in line:
-                            f.write(line)
-        except Exception as e:
-            print(f"[blocklist] Failed to remove dnsmasq rule ({filepath}): {e}")
-
-
-def _restart_dnsmasq():
-    """Reloads dnsmasq and NetworkManager if active without dropping leases."""
-    _run_privileged(["sudo", "killall", "-HUP", "dnsmasq"])
-    # Check if dnsmasq systemd unit actually exists before attempting reload
-    res = _run_privileged(["systemctl", "is-active", "--quiet", "dnsmasq"])
-    if res and res.returncode == 0:
-        _run_privileged(["sudo", "systemctl", "reload", "dnsmasq"])
-
 
 def _hostapd_deny_add(mac: str):
     """
@@ -655,134 +615,80 @@ def _hostapd_deny_remove(mac: str):
             print(f"[blocklist] hostapd deny remove error ({path}): {e}")
 
 
-def _dnsmasq_deny_add(mac: str):
-    """Instructs dnsmasq to ignore DHCP requests from this MAC."""
-    if not mac:
-        return
-    norm_mac = mac.upper()
-    rule = f"dhcp-host={norm_mac},ignore\n"
-    for d in DNSMASQ_DIRS:
-        try:
-            if os.path.exists(d):
-                filepath = os.path.join(d, "guardspot_deny.conf")
-                existing = ""
-                if os.path.exists(filepath):
-                    with open(filepath, "r") as f:
-                        existing = f.read()
-                if rule not in existing:
-                    with open(filepath, "a") as f:
-                        f.write(rule)
-        except Exception as e:
-            print(f"[blocklist] dnsmasq deny write error ({d}): {e}")
-    _restart_dnsmasq()
+_last_sync = {"ok": None, "warnings": [], "counts": {}}
 
 
-def _dnsmasq_deny_remove(mac: str):
-    """Restores DHCP service for this MAC."""
-    if not mac:
-        return
-    norm_mac = mac.upper()
-    for d in DNSMASQ_DIRS:
-        filepath = os.path.join(d, "guardspot_deny.conf")
-        try:
-            if os.path.exists(filepath):
-                with open(filepath, "r") as f:
-                    lines = f.readlines()
-                with open(filepath, "w") as f:
-                    for line in lines:
-                        if norm_mac not in line.upper():
-                            f.write(line)
-        except Exception as e:
-            print(f"[blocklist] dnsmasq deny remove error ({filepath}): {e}")
-    _restart_dnsmasq()
+def _desired_state(extra_macs=()):
+    """Read the COMPLETE desired firewall state from the database."""
+    domains, cidrs, ips = set(), set(), []
+    for e in BlockedEntry.query.all():
+        if e.entry_type == "domain":
+            domains.update(get_expanded_domains(e.value))
+            cidrs.update(get_service_cidrs(e.value))
+        else:
+            ips.append(e.value)
+    blocked = Device.query.filter_by(is_blocked=True).all()
+    macs = {d.mac_address.upper() for d in blocked if d.mac_address}
+    macs.update(m.upper() for m in extra_macs if m)
+    # Only fall back to IP matching for devices whose MAC we never learned, so a
+    # recycled DHCP address can never block an innocent new device.
+    ip_only = {d.ip_address for d in blocked if not d.mac_address}
+    return {"dns_domains": sorted(domains), "cidrs": sorted(cidrs), "block_ips": ips,
+            "macs": sorted(macs), "device_ips": sorted(ip_only)}
 
 
-def _add_iptables_drop(ip_or_cidr: str):
-    """Insert DROP rule at position 1 to precede RELATED,ESTABLISHED (supports IPv4, IPv6, and CIDRs)."""
-    tool = "ip6tables" if ":" in ip_or_cidr else "iptables"
-    check = _run_privileged(["sudo", tool, "-C", "FORWARD", "-d", ip_or_cidr, "-j", "DROP"])
-    if not check or check.returncode != 0:
-        _run_privileged(["sudo", tool, "-I", "FORWARD", "1", "-d", ip_or_cidr, "-j", "DROP"])
-        _run_privileged(["sudo", tool, "-I", "FORWARD", "1", "-s", ip_or_cidr, "-j", "DROP"])
-        _run_privileged(["sudo", tool, "-I", "OUTPUT", "1", "-d", ip_or_cidr, "-j", "DROP"])
-    # Terminate active TCP/UDP sessions immediately so video/feed streams halt
-    if "/" not in ip_or_cidr:
-        _run_privileged(["sudo", "conntrack", "-D", "-d", ip_or_cidr])
-        _run_privileged(["sudo", "conntrack", "-D", "-s", ip_or_cidr])
-    else:
-        _run_privileged(["sudo", "conntrack", "-F"])
-
-
-def _remove_iptables_drop(ip_or_cidr: str):
-    tool = "ip6tables" if ":" in ip_or_cidr else "iptables"
-    _run_privileged(["sudo", tool, "-D", "FORWARD", "-d", ip_or_cidr, "-j", "DROP"])
-    _run_privileged(["sudo", tool, "-D", "FORWARD", "-s", ip_or_cidr, "-j", "DROP"])
-    _run_privileged(["sudo", tool, "-D", "OUTPUT", "-d", ip_or_cidr, "-j", "DROP"])
-
-
-def is_port_53_listening() -> bool:
-    """Check if a local DNS server is listening on port 53."""
+def sync_firewall(flush_all=False, flush_ips=(), extra_macs=()):
+    """
+    Make the gateway match the database. Returns {"ok", "warnings", "counts"}.
+    Must be called inside a Flask app context.
+    """
+    global _last_sync
     if IS_WINDOWS:
-        return False
-    try:
-        out = subprocess.check_output("ss -lupn sport = :53", shell=True, text=True, stderr=subprocess.DEVNULL)
-        if ":53" in out:
-            return True
-    except Exception:
-        pass
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.bind(("0.0.0.0", 53))
-        s.close()
-        return False
-    except Exception:
-        return True
+        return {"ok": True, "warnings": [], "counts": {}}
+    state = _desired_state(extra_macs)
+    result = firewall.apply(
+        **state,
+        iface=config.CAPTURE_INTERFACE,
+        uplink=config.UPLINK_INTERFACE,
+        block_doh=config.BLOCK_PUBLIC_DOH,
+        block_dot=True,
+        sni_filter=config.SNI_FILTER,
+        block_quic=config.BLOCK_QUIC,
+        flush_all=flush_all,
+        flush_ips=flush_ips,
+    )
+    _last_sync = result
+    for w in result.get("warnings", []):
+        print(f"[firewall] WARNING: {w}")
+    return result
+
+
+def last_sync():
+    return dict(_last_sync)
+
+
+def firewall_status():
+    """Health report for the dashboard: why a block would NOT be enforced."""
+    if IS_WINDOWS:
+        return firewall.status()
+    domains = set()
+    for e in BlockedEntry.query.filter_by(entry_type="domain").all():
+        domains.update(get_expanded_domains(e.value))
+    return firewall.status(
+        iface=config.CAPTURE_INTERFACE,
+        uplink=config.UPLINK_INTERFACE,
+        expect_domains=sorted(domains),
+        sni_filter=config.SNI_FILTER,
+    )
 
 
 def init_gateway_firewall():
-    """
-    Initializes Raspberry Pi / Linux gateway firewall foundations:
-    1. Enables IP packet forwarding in sysctl.
-    2. If a local DNS server is listening on port 53, redirects incoming DNS queries on hotspot interface to it.
-       If not, cleans up stale redirects so DNS queries flow naturally to upstream.
-    3. Blocks DNS-over-TLS (port 853) on IPv4 & IPv6 with TCP reset so clients fall back to standard DNS.
-    """
+    """Start-up plumbing that does not need the database (forwarding, NAT, conntrack)."""
     if IS_WINDOWS:
         return
-
-    # 1. Enable IP forwarding
-    _run_privileged(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"])
-    _run_privileged(["sudo", "sysctl", "-w", "net.ipv6.conf.all.forwarding=1"])
-
-    # 2. Port 53 DNS redirection
-    iface = config.CAPTURE_INTERFACE if config.CAPTURE_INTERFACE else "wlan0"
-    if is_port_53_listening():
-        check_udp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        if not check_udp or check_udp.returncode != 0:
-            _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        check_tcp = _run_privileged(["sudo", "iptables", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        if not check_tcp or check_tcp.returncode != 0:
-            _run_privileged(["sudo", "iptables", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        print(f"[firewall] DNS redirection active on {iface}: all client port 53 queries sent to local sinkhole.")
-    else:
-        # Clean up any unconditional port 53 redirects that break outbound queries
-        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-        _run_privileged(["sudo", "iptables", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", "53"])
-
-    # 3. Block DNS-over-TLS (port 853) on IPv4 and IPv6 so mobile Private DNS falls back to standard DNS
-    check_dot_v4 = _run_privileged(["sudo", "iptables", "-C", "FORWARD", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
-    if not check_dot_v4 or check_dot_v4.returncode != 0:
-        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
-        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
-
-    check_dot_v6 = _run_privileged(["sudo", "ip6tables", "-C", "FORWARD", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
-    if not check_dot_v6 or check_dot_v6.returncode != 0:
-        _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-p", "tcp", "--dport", "853", "-j", "REJECT", "--reject-with", "tcp-reset"])
-        _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-p", "udp", "--dport", "853", "-j", "DROP"])
-
-    print("[firewall] Gateway firewall initialized: IP forwarding ON, DoT blocked.")
+    for w in firewall.init_system(config.CAPTURE_INTERFACE, config.UPLINK_INTERFACE):
+        print(f"[firewall] WARNING: {w}")
+    print("[firewall] Gateway plumbing initialised (IP forwarding, NAT, conntrack accounting).")
 
 
 # ==============================================================================
@@ -791,76 +697,36 @@ def init_gateway_firewall():
 
 def enforce_block(value: str, entry_type: str):
     """Push a block rule down to the OS and gateway firewalls."""
-    if entry_type == "ip":
-        if IS_WINDOWS:
-            _windows_add_ip_rule(f"GuardSpot_Block_IP_{value}", value)
-        else:
-            _add_iptables_drop(value)
-        return
-
-    # entry_type == "domain"
-    # 1. Expand to all associated CDNs and streaming endpoints
-    expanded_domains = get_expanded_domains(value)
-
-    # 2. Block well-known service CIDR blocks (e.g. Meta AS32934 for Instagram/Facebook)
-    cidrs = get_service_cidrs(value)
-    safe_val = re.sub(r'[^a-zA-Z0-9.-]', '_', value)
-    for cidr in cidrs:
-        if IS_WINDOWS:
-            _windows_add_ip_rule(f"GuardSpot_CIDR_{safe_val}_{cidr.replace('/', '_').replace(':', '_')}", cidr)
-        else:
-            _add_iptables_drop(cidr)
-
-    # 3. Sinkhole each expanded domain in dnsmasq configs
-    for dom in expanded_domains:
-        _append_dnsmasq_rule(dom)
-
-    # 4. Resolve only the root value and direct domain IPs (fast, non-blocking)
-    root_ips = resolve_domain_ips(value)
-    if IS_WINDOWS:
-        for ip in root_ips:
-            _windows_add_ip_rule(f"GuardSpot_Domain_{safe_val}_{ip}", ip)
-    else:
-        for ip in root_ips:
-            _add_iptables_drop(ip)
-
-    # 5. Reload dnsmasq once at the end and flush active connections
     if not IS_WINDOWS:
-        _restart_dnsmasq()
-        _run_privileged(["sudo", "conntrack", "-F"])
+        # flush_all: drop connections that are already open (e.g. a running video stream)
+        return sync_firewall(flush_all=True)
+
+    # ---- Windows (laptop hotspot): per-rule netsh firewall entries ----
+    if entry_type == "ip":
+        _windows_add_ip_rule(f"GuardSpot_Block_IP_{value}", value)
+        return
+    safe_val = re.sub(r'[^a-zA-Z0-9.-]', '_', value)
+    for cidr in get_service_cidrs(value):
+        _windows_add_ip_rule(f"GuardSpot_CIDR_{safe_val}_{cidr.replace('/', '_').replace(':', '_')}", cidr)
+    for ip in resolve_domain_ips(value):
+        _windows_add_ip_rule(f"GuardSpot_Domain_{safe_val}_{ip}", ip)
 
 
 def unenforce_block(value: str, entry_type: str):
-    """Remove a block rule from the OS and firewalls."""
+    """Remove a block rule from the OS and firewalls (call AFTER the DB row is deleted)."""
+    if not IS_WINDOWS:
+        return sync_firewall()
+
     if entry_type == "ip":
-        if IS_WINDOWS:
-            _windows_remove_rules(f"GuardSpot_Block_IP_{value}")
-        else:
-            _remove_iptables_drop(value)
+        _windows_remove_rules(f"GuardSpot_Block_IP_{value}")
         return
-
-    # entry_type == "domain"
-    # 1. Remove CIDR blocks
-    cidrs = get_service_cidrs(value)
     safe_val = re.sub(r'[^a-zA-Z0-9.-]', '_', value)
-    for cidr in cidrs:
-        if IS_WINDOWS:
-            _windows_remove_rules(f"GuardSpot_CIDR_{safe_val}_{cidr.replace('/', '_').replace(':', '_')}")
-        else:
-            _remove_iptables_drop(cidr)
-
-    # 2. Remove domain sinkhole & IP drops
-    expanded_domains = get_expanded_domains(value)
-    for dom in expanded_domains:
+    for cidr in get_service_cidrs(value):
+        _windows_remove_rules(f"GuardSpot_CIDR_{safe_val}_{cidr.replace('/', '_').replace(':', '_')}")
+    for dom in get_expanded_domains(value):
         safe_dom = re.sub(r'[^a-zA-Z0-9.-]', '_', dom)
-        if IS_WINDOWS:
-            _windows_remove_rules(f"GuardSpot_Domain_{safe_dom}_*")
-            _windows_remove_rules(f"GuardSpot_DomainIP_{safe_dom}_*")
-        else:
-            _remove_dnsmasq_rule(dom)
-            ips = resolve_domain_ips(dom)
-            for ip in ips:
-                _remove_iptables_drop(ip)
+        _windows_remove_rules(f"GuardSpot_Domain_{safe_dom}_*")
+        _windows_remove_rules(f"GuardSpot_DomainIP_{safe_dom}_*")
 
 
 # ==============================================================================
@@ -870,11 +736,11 @@ def unenforce_block(value: str, entry_type: str):
 def block_device(ip: str, mac: str = None):
     """
     Completely cuts a device off from the Wi-Fi network, local LAN, and internet.
-    1. Layer 2 Wi-Fi Rejection: Adds MAC to hostapd deny ACL, deauthenticates, and evicts station.
-       The device cannot re-associate or connect to the Wi-Fi.
-    2. DHCP Rejection: Tells dnsmasq to ignore DHCP requests from this MAC.
-    3. Layer 3/4 Firewall Dropping: Drops all incoming and outgoing packets (IPv4 and IPv6) by IP and MAC.
-    4. Active Connection Killing: Kills conntrack sessions on Linux, flushes ARP on Windows.
+    Call AFTER device.is_blocked has been committed to the database.
+    1. Firewall: the device's MAC (or IP, if its MAC is unknown) is dropped in the
+       GUARDSPOT chain at the top of FORWARD and INPUT - no traffic, no DHCP, no DNS.
+    2. Active connections for its IP are killed immediately (conntrack).
+    3. Wi-Fi: kicked from the access point and denied re-association (hostapd / iw).
     """
     if not mac:
         mac = lookup_mac(ip)
@@ -882,45 +748,18 @@ def block_device(ip: str, mac: str = None):
     print(f"[blocklist] Blocking entire device: IP={ip}, MAC={mac}")
 
     if IS_WINDOWS:
-        # Windows Firewall: Block ALL protocols, ALL ports, In and Out
         _windows_add_ip_rule(f"GuardSpot_BlockDevice_{ip}", ip)
-        # Flush ARP table
         _run_privileged(["netsh", "interface", "ip", "delete", "arpcache"])
         return
 
-    # Linux / Raspberry Pi Gateway Firewall
-    # 1. Kill active connection states immediately
-    _run_privileged(["sudo", "conntrack", "-D", "-s", ip])
-    _run_privileged(["sudo", "conntrack", "-D", "-d", ip])
-
-    # 2. Firewall IP packet dropping at top of chains (IPv4)
-    _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-s", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-d", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-I", "INPUT", "1", "-s", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-I", "OUTPUT", "1", "-d", ip, "-j", "DROP"])
-
+    result = sync_firewall(flush_ips=[ip], extra_macs=[mac] if mac else [])
     if mac:
-        norm_mac = mac.upper()
-        # 3. Firewall MAC packet dropping on both IPv4 and IPv6
-        _run_privileged(["sudo", "iptables", "-I", "FORWARD", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _run_privileged(["sudo", "iptables", "-I", "INPUT", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _run_privileged(["sudo", "ip6tables", "-I", "FORWARD", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _run_privileged(["sudo", "ip6tables", "-I", "INPUT", "1", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-
-        # 4. Layer 2 Wi-Fi Rejection: kick client from wireless driver (wlan0)
-        for iface in ("wlan0", "ap0", config.CAPTURE_INTERFACE):
-            _run_privileged(["sudo", "iw", "dev", iface, "station", "del", norm_mac.lower()])
-            _run_privileged(["sudo", "iw", "dev", iface, "station", "del", norm_mac.upper()])
-
-        # hostapd deny
-        _hostapd_deny_add(norm_mac)
-
-        # 5. DHCP Rejection: refuse to assign IP address to this MAC
-        _dnsmasq_deny_add(norm_mac)
+        _hostapd_deny_add(mac.upper())
+    return result
 
 
 def unblock_device(ip: str, mac: str = None):
-    """Restores network and Wi-Fi access for a previously blocked device."""
+    """Restores network and Wi-Fi access. Call AFTER device.is_blocked=False is committed."""
     if not mac:
         mac = lookup_mac(ip)
 
@@ -930,17 +769,7 @@ def unblock_device(ip: str, mac: str = None):
         _windows_remove_rules(f"GuardSpot_BlockDevice_{ip}")
         return
 
-    # Linux / Raspberry Pi
-    _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-s", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-d", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"])
-    _run_privileged(["sudo", "iptables", "-D", "OUTPUT", "-d", ip, "-j", "DROP"])
-
+    result = sync_firewall()
     if mac:
-        norm_mac = mac.upper()
-        _run_privileged(["sudo", "iptables", "-D", "FORWARD", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _run_privileged(["sudo", "iptables", "-D", "INPUT", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _run_privileged(["sudo", "ip6tables", "-D", "FORWARD", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _run_privileged(["sudo", "ip6tables", "-D", "INPUT", "-m", "mac", "--mac-source", norm_mac, "-j", "DROP"])
-        _hostapd_deny_remove(norm_mac)
-        _dnsmasq_deny_remove(norm_mac)
+        _hostapd_deny_remove(mac.upper())
+    return result

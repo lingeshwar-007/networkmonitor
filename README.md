@@ -237,3 +237,28 @@ DNS activity.
   on DHCP renewal).
 - A `systemd` unit file example for auto-start (mentioned above but not
   included here — happy to add if useful).
+
+---
+
+## 10. How blocking is enforced (firewall mode) and troubleshooting
+
+`firewall.py` rebuilds every layer from the database each time you block/unblock
+anything, so the rules can never drift from what the dashboard shows:
+
+| Layer | What it does |
+|---|---|
+| DNS sinkhole | Blocked domains (+ sub-domains + the app's CDN domains) go into `/etc/guardspot/blocked_domains.servers`; dnsmasq re-reads it on SIGHUP. |
+| DNS lock-in | Client port 53 is redirected to the Pi; DNS-over-TLS and well-known DoH resolvers are rejected. |
+| Packet filter | iptables chain `GUARDSPOT` is always the first rule of FORWARD/INPUT: blocked devices (by MAC), blocked IP ranges, and an SNI/Host match for blocked sites. QUIC is rejected while a site is blocked. |
+| Self-test | After every change a real DNS query proves the sinkhole is live. |
+
+The dashboard banner is green when everything is active; otherwise it lists exactly
+what is missing (not root, dnsmasq not running, NetworkManager hotspot needs one
+reconnect, ...). **Re-apply rules** rebuilds everything on demand.
+
+Requirements: the Pi must be the gateway (Wi-Fi AP + router) and GuardSpot must run as
+root. A device that only *sniffs* a network it does not route cannot block anything.
+
+Settings (environment variables): `GUARDSPOT_UPLINK`, `GUARDSPOT_BLOCK_DOH`,
+`GUARDSPOT_SNI_FILTER`, `GUARDSPOT_BLOCK_QUIC`, `GUARDSPOT_AUTO_QUARANTINE`
+(default off: a blocked site no longer kicks the whole device off the network).

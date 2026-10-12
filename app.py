@@ -221,16 +221,22 @@ def register_routes(app, limiter):
     @limiter.limit("60 per minute")
     def api_device_block(device_id):
         device = Device.query.get_or_404(device_id)
+        # Safety: never let the admin lock themselves out of the dashboard.
+        if request.remote_addr == device.ip_address:
+            return jsonify({"error": "That is the device you are using right now - "
+                                     "blocking it would lock you out of GuardSpot."}), 400
         device.is_blocked = True
         if not device.mac_address:
             resolved_mac = blocklist_module.lookup_mac(device.ip_address)
             if resolved_mac:
                 device.mac_address = resolved_mac
         db.session.commit()
-        blocklist_module.block_device(device.ip_address, device.mac_address)
+        result = blocklist_module.block_device(device.ip_address, device.mac_address)
         dev_label = device.nickname or device.mac_address or device.ip_address
         log_action(session.get("username", "admin"), f"BLOCK_DEVICE:{dev_label} ({device.ip_address})")
-        return jsonify(device.to_dict())
+        data = device.to_dict()
+        data["warnings"] = (result or {}).get("warnings", [])
+        return jsonify(data)
 
     @app.route("/api/devices/<int:device_id>/unblock", methods=["POST"])
     @login_required
@@ -239,10 +245,12 @@ def register_routes(app, limiter):
         device = Device.query.get_or_404(device_id)
         device.is_blocked = False
         db.session.commit()
-        blocklist_module.unblock_device(device.ip_address, device.mac_address)
+        result = blocklist_module.unblock_device(device.ip_address, device.mac_address)
         dev_label = device.nickname or device.mac_address or device.ip_address
         log_action(session.get("username", "admin"), f"UNBLOCK_DEVICE:{dev_label} ({device.ip_address})")
-        return jsonify(device.to_dict())
+        data = device.to_dict()
+        data["warnings"] = (result or {}).get("warnings", [])
+        return jsonify(data)
 
     @app.route("/api/devices/<int:device_id>/clear-vpn", methods=["POST"])
     @login_required
@@ -294,7 +302,9 @@ def register_routes(app, limiter):
 
             entry = blocklist_module.add_block(value, entry_type, reason, db=db)
             log_action(session.get("username", "admin"), f"BLOCK_WEBSITE:{value}")
-            return jsonify(entry.to_dict()), 201
+            data = entry.to_dict()
+            data["warnings"] = blocklist_module.last_sync().get("warnings", [])
+            return jsonify(data), 201
 
         entries = BlockedEntry.query.order_by(BlockedEntry.added_at.desc()).all()
         return jsonify([e.to_dict() for e in entries])
@@ -307,6 +317,22 @@ def register_routes(app, limiter):
         blocklist_module.remove_block(entry_id, db=db)
         log_action(session.get("username", "admin"), f"UNBLOCK_WEBSITE:{value}")
         return jsonify({"success": True})
+
+    # ---- Firewall health + manual re-sync ----
+    @app.route("/api/firewall/status")
+    @login_required
+    def api_firewall_status():
+        db.session.expire_all()
+        return jsonify(blocklist_module.firewall_status())
+
+    @app.route("/api/firewall/resync", methods=["POST"])
+    @login_required
+    @limiter.limit("10 per minute")
+    def api_firewall_resync():
+        db.session.expire_all()
+        result = blocklist_module.sync_firewall(flush_all=True)
+        log_action(session.get("username", "admin"), "FIREWALL_RESYNC")
+        return jsonify({"result": result, "status": blocklist_module.firewall_status()})
 
     @app.route("/api/most-used")
     @login_required
@@ -421,13 +447,16 @@ if __name__ == "__main__":
     app = create_app()
     with app.app_context():
         try:
-            entries = BlockedEntry.query.all()
-            for entry in entries:
-                blocklist_module.enforce_block(entry.value, entry.entry_type)
-            devices = Device.query.filter_by(is_blocked=True).all()
-            for dev in devices:
-                blocklist_module.block_device(dev.ip_address, dev.mac_address)
-            print(f"[GuardSpot Firewall] Active: {len(entries)} blocklist rules & {len(devices)} blocked devices enforced.")
+            # Rebuild every firewall layer from the database (also repairs anything
+            # that was lost on reboot or changed by hand).
+            if config.IS_PI or platform.system() == "Linux":
+                result = blocklist_module.sync_firewall(flush_all=True)
+                print(f"[GuardSpot Firewall] Synced from database: {result.get('counts')}")
+            else:
+                for entry in BlockedEntry.query.all():
+                    blocklist_module.enforce_block(entry.value, entry.entry_type)
+                for dev in Device.query.filter_by(is_blocked=True).all():
+                    blocklist_module.block_device(dev.ip_address, dev.mac_address)
         except Exception as e:
             print(f"[GuardSpot Firewall] Sync notice: {e}")
 

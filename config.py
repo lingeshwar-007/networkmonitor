@@ -79,7 +79,33 @@ CAPTURE_FILTER = os.environ.get("GUARDSPOT_FILTER", vpn_detector.get_capture_fil
 SQLALCHEMY_DATABASE_URI = f"sqlite:///{os.path.join(BASE_DIR, 'guardspot.db')}"
 
 BLOCK_METHOD = "dns"
-DNSMASQ_BLOCKLIST_FILE = "/etc/dnsmasq.d/guardspot_blocklist.conf"
+
+
+def _flag(name, default):
+    val = os.environ.get(name)
+    return default if val is None else val.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---- Firewall behaviour (Raspberry Pi gateway) -------------------------------
+# Interface that connects the Pi to the internet (eth0, or wlan1 / usb0 ...).
+# None = auto-detect from the default route.
+UPLINK_INTERFACE = os.environ.get("GUARDSPOT_UPLINK") or None
+
+# Reject well-known DNS-over-HTTPS resolvers (1.1.1.1, 8.8.8.8, ...) so browsers
+# cannot bypass the DNS filter. DNS-over-TLS (port 853) is always rejected.
+BLOCK_PUBLIC_DOH = _flag("GUARDSPOT_BLOCK_DOH", True)
+
+# Match the site name inside HTTPS (SNI) / HTTP (Host) traffic so a blocked site is
+# refused even when the client already knows its IP address or uses its own DNS.
+SNI_FILTER = _flag("GUARDSPOT_SNI_FILTER", True)
+
+# While any website/app is blocked, reject QUIC (UDP/443) so browsers and apps fall
+# back to TCP where the SNI match works. Has no effect when nothing is blocked.
+BLOCK_QUIC = _flag("GUARDSPOT_BLOCK_QUIC", True)
+
+# If True, a device that even TRIES to open a blocked site/app is cut off from the
+# whole network. Default False: blocking a site only blocks that site.
+AUTO_QUARANTINE = _flag("GUARDSPOT_AUTO_QUARANTINE", False)
 
 SECRET_KEY = os.environ.get("GUARDSPOT_SECRET_KEY", "change-this-in-production")
 ADMIN_USERNAME = os.environ.get("GUARDSPOT_ADMIN", "admin")
