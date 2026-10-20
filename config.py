@@ -91,8 +91,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
-# Safer default: a blocked DNS request does not automatically disconnect the whole device.
-AUTO_QUARANTINE_ON_BLOCKED_ACCESS = _env_bool("GUARDSPOT_AUTO_QUARANTINE", False)
+# Default to True: any device attempting to access blocked services is instantly isolated and kicked.
+AUTO_QUARANTINE_ON_BLOCKED_ACCESS = _env_bool("GUARDSPOT_AUTO_QUARANTINE", True)
 SESSION_COOKIE_SECURE = _env_bool("GUARDSPOT_SESSION_COOKIE_SECURE", False)
 
 # Bind address and port: 0.0.0.0 on Pi allows browser access via the Pi's IP; 127.0.0.1 on Windows

@@ -407,10 +407,15 @@ def auto_start_sniffer():
     if platform.system() == "Linux":
         try:
             res = subprocess.run(["pgrep", "-f", "sniffer.py"], capture_output=True, text=True)
-            if not res.stdout.strip():
-                cmd = ["sudo", sys.executable, sniffer_path] if os.geteuid() != 0 else [sys.executable, sniffer_path]
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-                print("[GuardSpot] Background packet sniffer started on Linux/Pi.")
+            pids = [p for p in res.stdout.strip().split() if p and int(p) != os.getpid()]
+            if not pids:
+                cmd = ["sudo", sys.executable, "-u", sniffer_path] if os.geteuid() != 0 else [sys.executable, "-u", sniffer_path]
+                log_path = os.path.join(base_dir, "sniffer.log")
+                log_fh = open(log_path, "a", buffering=1)
+                env = os.environ.copy()
+                env["PYTHONUNBUFFERED"] = "1"
+                subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh, env=env, start_new_session=True)
+                print(f"[GuardSpot] Background packet sniffer started on Linux/Pi (logging to {log_path}).")
         except Exception as e:
             print(f"[GuardSpot] Notice: Could not auto-start sniffer: {e}")
 
