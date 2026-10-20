@@ -9,6 +9,7 @@ Enforces whole-device blocking and domain/app blocking via blocklist.py.
 
 from functools import wraps
 from datetime import datetime, timedelta
+import secrets
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -40,6 +41,9 @@ def _record_failed_attempt(ip: str):
 
 
 def create_app():
+    if not config.SECRET_KEY:
+        raise RuntimeError("GUARDSPOT_SECRET_KEY must be set before starting GuardSpot")
+
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = config.SQLALCHEMY_DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -48,6 +52,19 @@ def create_app():
     # Defense-in-depth session cookie settings
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = config.SESSION_COOKIE_SECURE
+
+    @app.before_request
+    def protect_state_changing_requests():
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if request.endpoint == "login":
+            return None
+        expected = session.get("csrf_token")
+        supplied = request.headers.get("X-CSRFToken") or request.form.get("csrf_token")
+        if not expected or not supplied or not secrets.compare_digest(supplied, expected):
+            return jsonify({"error": "CSRF validation failed"}), 403
+        return None
 
     db.init_app(app)
 
@@ -68,6 +85,11 @@ def create_app():
             pass
         try:
             db.session.execute(db.text("ALTER TABLE devices ADD COLUMN vpn_type VARCHAR(80);"))
+            db.session.commit()
+        except Exception:
+            pass
+        try:
+            db.session.execute(db.text("ALTER TABLE activity_log ADD COLUMN application_name VARCHAR(100);"))
             db.session.commit()
         except Exception:
             pass
@@ -100,7 +122,8 @@ def register_routes(app, limiter):
             return render_template(
                 "login.html",
                 error="Rate limit exceeded: Too many attempts. Please wait 1 minute before retrying.",
-                is_pi=config.IS_PI
+                is_pi=config.IS_PI,
+                config_pi_host=config.PI_HOSTNAME,
             ), 429
         return jsonify({"error": "Rate limit exceeded. Please wait a moment before retrying."}), 429
 
@@ -131,23 +154,16 @@ def register_routes(app, limiter):
             auth_method = request.form.get("auth_method", "password")
             key_path = request.form.get("key_path", "").strip()
 
-            # 1. Configured Admin credentials (default: admin / change-this-password)
-            if username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
+            # 1. Configured admin credentials. A password must be explicitly configured.
+            if config.ADMIN_PASSWORD and username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
                 session["is_admin"] = True
                 session["username"] = username
                 log_action(username, "ADMIN_LOGIN")
                 return redirect(url_for("dashboard"))
 
-            # 2. Standard development fallback (admin / admin)
-            if username == "admin" and password == "admin":
-                session["is_admin"] = True
-                session["username"] = "admin"
-                log_action("admin", "DEFAULT_ADMIN_LOGIN")
-                return redirect(url_for("dashboard"))
-
-            # 3. Raspberry Pi Linux / SSH authentication (e.g. guardspot / your-pi-password)
+            # 2. Raspberry Pi Linux / SSH authentication (e.g. guardspot / your-pi-password)
             ssh_err = None
-            ssh_host = pi_ip if (pi_ip and validators.is_valid_host(pi_ip)) else "guardspot"
+            ssh_host = pi_ip if (pi_ip and validators.is_valid_host(pi_ip)) else config.PI_HOSTNAME
             if username:
                 try:
                     client = connect_ssh(
@@ -182,15 +198,17 @@ def register_routes(app, limiter):
             if ssh_err:
                 err_msg = f"SSH to {ssh_host} failed: {ssh_err}."
             else:
-                err_msg = "Invalid credentials. Log in with Admin (admin / change-this-password) or your Raspberry Pi SSH user (pi / your password)."
+                err_msg = "Invalid credentials. Configure GUARDSPOT_ADMIN_PASSWORD or use your Raspberry Pi SSH credentials."
 
             return render_template(
                 "login.html",
                 error=err_msg,
-                is_pi=config.IS_PI
+                is_pi=config.IS_PI,
+                config_pi_host=config.PI_HOSTNAME,
             )
 
-        return render_template("login.html", is_pi=config.IS_PI)
+        session.setdefault("csrf_token", secrets.token_urlsafe(32))
+        return render_template("login.html", is_pi=config.IS_PI, config_pi_host=config.PI_HOSTNAME)
 
     @app.route("/logout")
     def logout():
@@ -205,6 +223,7 @@ def register_routes(app, limiter):
             "dashboard.html",
             username=session.get("username", config.ADMIN_USERNAME),
             is_pi=config.IS_PI,
+            csrf_token=session.setdefault("csrf_token", secrets.token_urlsafe(32)),
         )
 
 
@@ -221,22 +240,16 @@ def register_routes(app, limiter):
     @limiter.limit("60 per minute")
     def api_device_block(device_id):
         device = Device.query.get_or_404(device_id)
-        # Safety: never let the admin lock themselves out of the dashboard.
-        if request.remote_addr == device.ip_address:
-            return jsonify({"error": "That is the device you are using right now - "
-                                     "blocking it would lock you out of GuardSpot."}), 400
         device.is_blocked = True
         if not device.mac_address:
             resolved_mac = blocklist_module.lookup_mac(device.ip_address)
             if resolved_mac:
                 device.mac_address = resolved_mac
         db.session.commit()
-        result = blocklist_module.block_device(device.ip_address, device.mac_address)
+        blocklist_module.block_device(device.ip_address, device.mac_address)
         dev_label = device.nickname or device.mac_address or device.ip_address
         log_action(session.get("username", "admin"), f"BLOCK_DEVICE:{dev_label} ({device.ip_address})")
-        data = device.to_dict()
-        data["warnings"] = (result or {}).get("warnings", [])
-        return jsonify(data)
+        return jsonify(device.to_dict())
 
     @app.route("/api/devices/<int:device_id>/unblock", methods=["POST"])
     @login_required
@@ -245,12 +258,10 @@ def register_routes(app, limiter):
         device = Device.query.get_or_404(device_id)
         device.is_blocked = False
         db.session.commit()
-        result = blocklist_module.unblock_device(device.ip_address, device.mac_address)
+        blocklist_module.unblock_device(device.ip_address, device.mac_address)
         dev_label = device.nickname or device.mac_address or device.ip_address
         log_action(session.get("username", "admin"), f"UNBLOCK_DEVICE:{dev_label} ({device.ip_address})")
-        data = device.to_dict()
-        data["warnings"] = (result or {}).get("warnings", [])
-        return jsonify(data)
+        return jsonify(device.to_dict())
 
     @app.route("/api/devices/<int:device_id>/clear-vpn", methods=["POST"])
     @login_required
@@ -302,9 +313,7 @@ def register_routes(app, limiter):
 
             entry = blocklist_module.add_block(value, entry_type, reason, db=db)
             log_action(session.get("username", "admin"), f"BLOCK_WEBSITE:{value}")
-            data = entry.to_dict()
-            data["warnings"] = blocklist_module.last_sync().get("warnings", [])
-            return jsonify(data), 201
+            return jsonify(entry.to_dict()), 201
 
         entries = BlockedEntry.query.order_by(BlockedEntry.added_at.desc()).all()
         return jsonify([e.to_dict() for e in entries])
@@ -317,22 +326,6 @@ def register_routes(app, limiter):
         blocklist_module.remove_block(entry_id, db=db)
         log_action(session.get("username", "admin"), f"UNBLOCK_WEBSITE:{value}")
         return jsonify({"success": True})
-
-    # ---- Firewall health + manual re-sync ----
-    @app.route("/api/firewall/status")
-    @login_required
-    def api_firewall_status():
-        db.session.expire_all()
-        return jsonify(blocklist_module.firewall_status())
-
-    @app.route("/api/firewall/resync", methods=["POST"])
-    @login_required
-    @limiter.limit("10 per minute")
-    def api_firewall_resync():
-        db.session.expire_all()
-        result = blocklist_module.sync_firewall(flush_all=True)
-        log_action(session.get("username", "admin"), "FIREWALL_RESYNC")
-        return jsonify({"result": result, "status": blocklist_module.firewall_status()})
 
     @app.route("/api/most-used")
     @login_required
@@ -404,6 +397,10 @@ def free_port(port: int):
 
 def auto_start_sniffer():
     """Automatically starts the background packet sniffer so you only ever have to run app.py."""
+    if not config.IS_PI and not config.LOCAL_CAPTURE:
+        print("[GuardSpot] Laptop mode: waiting for the Raspberry Pi SSH connection; local sniffer disabled.")
+        return
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     sniffer_path = os.path.join(base_dir, "sniffer.py")
 
@@ -447,16 +444,13 @@ if __name__ == "__main__":
     app = create_app()
     with app.app_context():
         try:
-            # Rebuild every firewall layer from the database (also repairs anything
-            # that was lost on reboot or changed by hand).
-            if config.IS_PI or platform.system() == "Linux":
-                result = blocklist_module.sync_firewall(flush_all=True)
-                print(f"[GuardSpot Firewall] Synced from database: {result.get('counts')}")
-            else:
-                for entry in BlockedEntry.query.all():
-                    blocklist_module.enforce_block(entry.value, entry.entry_type)
-                for dev in Device.query.filter_by(is_blocked=True).all():
-                    blocklist_module.block_device(dev.ip_address, dev.mac_address)
+            entries = BlockedEntry.query.all()
+            for entry in entries:
+                blocklist_module.enforce_block(entry.value, entry.entry_type)
+            devices = Device.query.filter_by(is_blocked=True).all()
+            for dev in devices:
+                blocklist_module.block_device(dev.ip_address, dev.mac_address)
+            print(f"[GuardSpot Firewall] Active: {len(entries)} blocklist rules & {len(devices)} blocked devices enforced.")
         except Exception as e:
             print(f"[GuardSpot Firewall] Sync notice: {e}")
 

@@ -9,7 +9,7 @@
     {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
 
     <label>Raspberry Pi Hostname or IP</label>
-    <input type="text" name="pi_ip" value="guardspot" placeholder="guardspot (or IP address)">
+    <input type="text" name="pi_ip" value="{{ config_pi_host|default('guardspot.local') }}" placeholder="guardspot.local (or IP address)">
 
     <label>SSH username</label>
     <input type="text" name="ssh_username" value="guardspot" placeholder="guardspot" required>

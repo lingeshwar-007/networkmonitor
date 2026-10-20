@@ -32,11 +32,11 @@ from models import db, Device, ActivityLog, log_action
 import blocklist
 import vpn_detector
 import config
+from service_classifier import classify_domain
 
 
 app = create_app()
 _resolved_iface = None
-_last_lookup = {}  # ip -> time of last ARP/hostname lookup
 
 
 def check_privileges():
@@ -107,19 +107,10 @@ def get_or_create_device(ip_address: str) -> Device:
     its block is automatically transferred and re-enforced on the new IP.
     """
     now = datetime.datetime.utcnow()
-    device = Device.query.filter_by(ip_address=ip_address).first()
+    mac = lookup_mac(ip_address)
+    hostname = lookup_hostname(ip_address)
 
-    # ARP / reverse-DNS lookups are slow (up to 0.3 s) and this runs inside the packet
-    # callback, which delayed the forged DNS replies. Only look up what is still missing,
-    # and not more than once a minute per IP.
-    need_mac = device is None or not device.mac_address
-    need_host = device is None or not device.nickname
-    if (need_mac or need_host) and now.timestamp() - _last_lookup.get(ip_address, 0) < 60 and device is not None:
-        need_mac = need_host = False
-    if need_mac or need_host:
-        _last_lookup[ip_address] = now.timestamp()
-    mac = lookup_mac(ip_address) if need_mac else None
-    hostname = lookup_hostname(ip_address) if need_host else None
+    device = Device.query.filter_by(ip_address=ip_address).first()
 
     if device is None:
         # Check if this hardware MAC was already recorded under an older IP
@@ -259,6 +250,7 @@ def handle_query(pkt):
     src_ip = pkt[IP].src
     domain = pkt[DNSQR].qname.decode(errors="ignore").rstrip(".")
     qtype = pkt[DNSQR].qtype
+    application_name = classify_domain(domain)
 
     with app.app_context():
         db.session.expire_all()
@@ -271,6 +263,7 @@ def handle_query(pkt):
             log_entry = ActivityLog(
                 device_id=device.id,
                 domain=domain,
+                application_name=application_name,
                 resolved_ip="0.0.0.0",
                 status="blocked",
             )
@@ -290,6 +283,7 @@ def handle_query(pkt):
             log_entry = ActivityLog(
                 device_id=device.id,
                 domain=domain,
+                application_name=vpn_service or application_name,
                 resolved_ip="0.0.0.0",
                 status="blocked",
             )
@@ -304,10 +298,9 @@ def handle_query(pkt):
             # Active DNS Sinkhole: respond with 0.0.0.0 immediately
             send_dns_sinkhole(pkt, pkt[DNSQR].qname, qtype, rcode=0)
 
-            # OPTIONAL AUTO-DEFENSE / QUARANTINE (off by default, see config.AUTO_QUARANTINE):
-            # when enabled, a device that tries to use a blocked service (web or app)
-            # is isolated from the whole network. When disabled, only the site is blocked.
-            if config.AUTO_QUARANTINE and not device.is_blocked:
+            # Optional auto-quarantine. Disabled by default because a blocked
+            # DNS request should not automatically disconnect the entire device.
+            if config.AUTO_QUARANTINE_ON_BLOCKED_ACCESS and not device.is_blocked:
                 device.is_blocked = True
                 if not device.mac_address:
                     resolved_mac = blocklist.lookup_mac(src_ip)
@@ -325,19 +318,21 @@ def handle_query(pkt):
             log_entry = ActivityLog(
                 device_id=device.id,
                 domain=domain,
+                application_name=application_name,
                 resolved_ip="0.0.0.0",
                 status="blocked",
             )
             db.session.add(log_entry)
             db.session.commit()
-            print(f"[WEBSITE & APP BLOCKED] {src_ip} -> {domain} (sinkholed"
-                  f"{' & device isolated' if config.AUTO_QUARANTINE else ''})")
+            action = "sinkholed & device isolated" if config.AUTO_QUARANTINE_ON_BLOCKED_ACCESS else "sinkholed"
+            print(f"[WEBSITE & APP BLOCKED] {src_ip} -> {domain} ({action})")
             return
 
         # 4. Allowed request
         log_entry = ActivityLog(
             device_id=device.id,
             domain=domain,
+            application_name=application_name,
             resolved_ip=None,
             status="allowed",
         )
@@ -347,13 +342,7 @@ def handle_query(pkt):
 
 
 def handle_response(pkt):
-    """Watch DNS responses to dynamically firewall newly discovered IPs for blocked domains.
-
-    Windows only. On the Linux gateway the DNS sinkhole + SNI/Host match in firewall.py
-    do the job, and dropping resolved IPs of shared CDNs would break unrelated sites.
-    """
-    if not blocklist.IS_WINDOWS:
-        return
+    """Watch DNS responses to dynamically firewall newly discovered IPs for blocked domains."""
     if not pkt.haslayer(DNSRR):
         return
     try:

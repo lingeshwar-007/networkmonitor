@@ -79,37 +79,21 @@ CAPTURE_FILTER = os.environ.get("GUARDSPOT_FILTER", vpn_detector.get_capture_fil
 SQLALCHEMY_DATABASE_URI = f"sqlite:///{os.path.join(BASE_DIR, 'guardspot.db')}"
 
 BLOCK_METHOD = "dns"
+DNSMASQ_BLOCKLIST_FILE = "/etc/dnsmasq.d/guardspot_blocklist.conf"
 
-
-def _flag(name, default):
-    val = os.environ.get(name)
-    return default if val is None else val.strip().lower() in ("1", "true", "yes", "on")
-
-
-# ---- Firewall behaviour (Raspberry Pi gateway) -------------------------------
-# Interface that connects the Pi to the internet (eth0, or wlan1 / usb0 ...).
-# None = auto-detect from the default route.
-UPLINK_INTERFACE = os.environ.get("GUARDSPOT_UPLINK") or None
-
-# Reject well-known DNS-over-HTTPS resolvers (1.1.1.1, 8.8.8.8, ...) so browsers
-# cannot bypass the DNS filter. DNS-over-TLS (port 853) is always rejected.
-BLOCK_PUBLIC_DOH = _flag("GUARDSPOT_BLOCK_DOH", True)
-
-# Match the site name inside HTTPS (SNI) / HTTP (Host) traffic so a blocked site is
-# refused even when the client already knows its IP address or uses its own DNS.
-SNI_FILTER = _flag("GUARDSPOT_SNI_FILTER", True)
-
-# While any website/app is blocked, reject QUIC (UDP/443) so browsers and apps fall
-# back to TCP where the SNI match works. Has no effect when nothing is blocked.
-BLOCK_QUIC = _flag("GUARDSPOT_BLOCK_QUIC", True)
-
-# If True, a device that even TRIES to open a blocked site/app is cut off from the
-# whole network. Default False: blocking a site only blocks that site.
-AUTO_QUARANTINE = _flag("GUARDSPOT_AUTO_QUARANTINE", False)
-
-SECRET_KEY = os.environ.get("GUARDSPOT_SECRET_KEY", "change-this-in-production")
+SECRET_KEY = os.environ.get("GUARDSPOT_SECRET_KEY", "")
 ADMIN_USERNAME = os.environ.get("GUARDSPOT_ADMIN", "admin")
-ADMIN_PASSWORD = os.environ.get("GUARDSPOT_ADMIN_PASSWORD", "change-this-password")
+ADMIN_PASSWORD = os.environ.get("GUARDSPOT_ADMIN_PASSWORD", "")
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+# Safer default: a blocked DNS request does not automatically disconnect the whole device.
+AUTO_QUARANTINE_ON_BLOCKED_ACCESS = _env_bool("GUARDSPOT_AUTO_QUARANTINE", False)
+SESSION_COOKIE_SECURE = _env_bool("GUARDSPOT_SESSION_COOKIE_SECURE", False)
 
 # Bind address and port: 0.0.0.0 on Pi allows browser access via the Pi's IP; 127.0.0.1 on Windows
 HOST = os.environ.get("GUARDSPOT_HOST", "0.0.0.0" if IS_PI else "127.0.0.1")
@@ -117,3 +101,7 @@ PORT = int(os.environ.get("GUARDSPOT_PORT", 5000))
 
 # SSH connector settings (for remote control of Raspberry Pi)
 TUNNEL_LOCAL_PORT = int(os.environ.get("GUARDSPOT_FORWARD_PORT", 5050))
+PI_HOSTNAME = os.environ.get("GUARDSPOT_PI_HOST", "guardspot.local")
+REMOTE_PROJECT_DIR = os.environ.get("GUARDSPOT_REMOTE_DIR", "~/networkmonitor")
+# A Windows laptop should show the Pi dashboard, not start a sniffer on itself.
+LOCAL_CAPTURE = _env_bool("GUARDSPOT_LOCAL_CAPTURE", False)

@@ -1,26 +1,15 @@
 [Unit]
-Description=GuardSpot Web Dashboard + Firewall Manager
-# dnsmasq/hostapd first, so the DNS filter and Wi-Fi AP exist when the rules are applied
-After=network-online.target dnsmasq.service hostapd.service
-Wants=network-online.target
+Description=GuardSpot Web Dashboard
+After=network.target
 
 [Service]
 Type=simple
-# Must be root: GuardSpot manages iptables, dnsmasq and hostapd. Without root the
-# block list is saved but NOTHING is enforced (the dashboard banner will say so).
-User=root
-# Adjust to where you cloned the project, e.g. /home/pi/networkmonitor
-WorkingDirectory=/home/pi/networkmonitor
-ExecStart=/home/pi/networkmonitor/venv/bin/python3 app.py
+User=pi
+WorkingDirectory=/home/pi/guardspot/networkmonitor
+ExecStart=/home/pi/guardspot/venv/bin/python3 app.py
 Restart=on-failure
 RestartSec=5
-Environment=GUARDSPOT_ADMIN=admin
-Environment=GUARDSPOT_ADMIN_PASSWORD=ChangeThisPassword
-Environment=GUARDSPOT_SECRET_KEY=change-this-to-something-random
-# Optional: uplink interface to the internet (auto-detected when unset)
-#Environment=GUARDSPOT_UPLINK=eth0
-# Optional: cut a device off completely when it even tries a blocked site/app
-#Environment=GUARDSPOT_AUTO_QUARANTINE=true
+EnvironmentFile=-/etc/guardspot/guardspot.env
 
 [Install]
 WantedBy=multi-user.target

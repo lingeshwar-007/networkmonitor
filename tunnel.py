@@ -52,33 +52,36 @@ def _make_handler(remote_host, remote_port, transport):
 import socket
 import re
 import subprocess
+import os
+import config
 
 
 def resolve_pi_host(host_or_ip: str = "guardspot") -> str:
-    """Resolve a hostname like 'guardspot' or 'guardspot.local' to its dynamic DHCP IP."""
-    target = (host_or_ip or "guardspot").strip()
+    """Find a Pi by hostname first, falling back to a discovered LAN IP."""
+    target = (host_or_ip or config.PI_HOSTNAME).strip()
 
-    # 1. Direct DNS / NetBIOS / mDNS resolution
-    try:
-        return socket.gethostbyname(target)
-    except Exception:
-        pass
+    # Keep hostnames as hostnames so SSH host-key verification matches the
+    # hostname stored in known_hosts. DNS/mDNS handles the changing address.
+    if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", target):
+        candidates = [target]
+        if not target.endswith(".local"):
+            candidates.append(f"{target}.local")
+        for candidate in candidates:
+            try:
+                socket.gethostbyname(candidate)
+                return candidate
+            except Exception:
+                pass
 
-    # 2. Try .local suffix
-    if not target.endswith(".local"):
+    # 1. Direct DNS / NetBIOS / mDNS resolution, including standard names.
+    for candidate in ("guardspot.local", "guardspot", "raspberrypi.local", "raspberrypi"):
         try:
-            return socket.gethostbyname(f"{target}.local")
+            socket.gethostbyname(candidate)
+            return candidate
         except Exception:
             pass
 
-    # 3. Try standard Raspberry Pi hostnames
-    for name in ("guardspot", "guardspot.local", "raspberrypi", "raspberrypi.local"):
-        try:
-            return socket.gethostbyname(name)
-        except Exception:
-            pass
-
-    # 4. Check ARP table for LAN IPs that respond on SSH port 22
+    # 2. Check ARP table for LAN IPs that respond on SSH port 22.
     try:
         arp_output = subprocess.check_output("arp -a", shell=True).decode(errors="ignore")
         lan_ips = re.findall(r"(\b192\.168\.\d+\.\d+\b|\b10\.\d+\.\d+\.\d+\b)", arp_output)
@@ -105,12 +108,19 @@ import time
 
 def ensure_remote_services(client):
     """Ensure both sniffer.py and app.py are actively running on the Raspberry Pi."""
+    remote_dir = config.REMOTE_PROJECT_DIR
+    python_bin = f"{remote_dir}/venv/bin/python3"
+    # Fall back to the system interpreter when the Pi project has no venv.
+    python_cmd = f"test -x {python_bin} && echo {python_bin} || echo python3"
+    _, stdout, _ = client.exec_command(python_cmd)
+    python_exec = stdout.read().decode(errors="ignore").strip() or "python3"
+
     # 1. Ensure sniffer.py is running on the Pi
     try:
         _, stdout, _ = client.exec_command("pgrep -f sniffer.py")
         if not stdout.read().strip():
             client.exec_command(
-                "nohup sudo python3 ~/Downloads/networkmonitor/sniffer.py > /tmp/sniffer.log 2>&1 &"
+                f"cd {remote_dir} && nohup sudo {python_exec} sniffer.py > /tmp/guardspot-sniffer.log 2>&1 &"
             )
             print("[GuardSpot] Remote packet sniffer started on Raspberry Pi.")
     except Exception as e:
@@ -121,7 +131,7 @@ def ensure_remote_services(client):
         _, stdout, _ = client.exec_command("pgrep -f 'python3 app.py'")
         if not stdout.read().strip():
             client.exec_command(
-                "nohup python3 ~/Downloads/networkmonitor/app.py > /tmp/app.log 2>&1 &"
+                f"cd {remote_dir} && nohup env GUARDSPOT_IS_PI=true GUARDSPOT_HOST=127.0.0.1 {python_exec} app.py > /tmp/guardspot-app.log 2>&1 &"
             )
             print("[GuardSpot] Remote web dashboard started on Raspberry Pi.")
             time.sleep(2)  # Give Flask 2 seconds to bind port 5000
@@ -134,7 +144,13 @@ def connect_ssh(pi_ip, ssh_username, password=None, key_path=None, ssh_port=22):
     resolved_host = resolve_pi_host(pi_ip)
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.load_system_host_keys()
+    # Secure default: reject unknown host keys. Set GUARDSPOT_SSH_ALLOW_UNKNOWN_HOST=1
+    # only for temporary development when the Pi key is not yet in ~/.ssh/known_hosts.
+    if os.environ.get("GUARDSPOT_SSH_ALLOW_UNKNOWN_HOST", "").lower() in {"1", "true", "yes"}:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    else:
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     if key_path:
         pkey = paramiko.RSAKey.from_private_key_file(key_path)

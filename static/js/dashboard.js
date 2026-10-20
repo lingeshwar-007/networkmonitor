@@ -1,4 +1,13 @@
-async function fetchJSON(url, opts) {
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+  }[ch]));
+}
+
+async function fetchJSON(url, opts = {}) {
+  const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+  opts.headers = { ...(opts.headers || {}) };
+  if (csrf && opts.method && opts.method !== "GET") opts.headers["X-CSRFToken"] = csrf;
   const res = await fetch(url, opts);
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
@@ -10,59 +19,6 @@ async function fetchJSON(url, opts) {
 function timeAgo(isoString) {
   if (!isoString) return "—";
   return new Date(isoString).toLocaleString();
-}
-
-function escapeHtml(v) {
-  return String(v == null ? "" : v).replace(/[&<>"']/g, c => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-// Show firewall enforcement warnings returned by block/unblock calls.
-function showEnforcementWarnings(res) {
-  if (res && Array.isArray(res.warnings) && res.warnings.length) {
-    alert("Saved, but the firewall reported problems:\n\n- " + res.warnings.join("\n- "));
-  }
-  loadFirewallStatus();
-}
-
-// ---- Firewall health banner: tells you WHY a block is not being enforced ----
-async function loadFirewallStatus() {
-  const box = document.getElementById("fw-banner");
-  if (!box) return;
-  try {
-    const st = await fetchJSON("/api/firewall/status");
-    const bad = st.checks.filter(c => !c.ok);
-    if (st.ok) {
-      box.className = "fw-banner ok";
-      box.innerHTML = `<div class="fw-banner-head"><strong>Firewall active</strong>` +
-        `<button id="fw-resync" type="button">Re-apply rules</button></div>`;
-    } else {
-      box.className = "fw-banner";
-      const items = bad.map(c =>
-        `<li><strong>${escapeHtml(c.name)}</strong>${c.detail ? " — " + escapeHtml(c.detail) : ""}` +
-        `${c.fix ? `<div class="fw-fix">Fix: ${escapeHtml(c.fix)}</div>` : ""}</li>`).join("");
-      const warns = (st.last_apply && st.last_apply.warnings || [])
-        .map(w => `<li>${escapeHtml(w)}</li>`).join("");
-      box.innerHTML = `<div class="fw-banner-head"><strong>Firewall is NOT fully enforcing blocks</strong>` +
-        `<button id="fw-resync" type="button">Re-apply rules</button></div><ul>${items}${warns}</ul>`;
-    }
-    box.style.display = "block";
-    const btn = document.getElementById("fw-resync");
-    if (btn) {
-      btn.onclick = async () => {
-        btn.disabled = true;
-        btn.textContent = "Applying...";
-        try {
-          await fetchJSON("/api/firewall/resync", { method: "POST" });
-        } catch (err) {
-          alert("Re-apply failed: " + err.message);
-        }
-        loadFirewallStatus();
-      };
-    }
-  } catch (err) {
-    console.error("Error loading firewall status:", err);
-  }
 }
 
 let currentModalDevice = null;
@@ -101,20 +57,20 @@ async function loadDevices() {
         : `<span class="status-pill disconnected"><span class="dot"></span>Offline</span>`;
 
       const vpnBadge = d.vpn_detected
-        ? `<span class="badge vpn-badge" title="VPN/Proxy detected: ${escapeHtml(d.vpn_type || 'Active')}"><span class="vpn-dot"></span>${escapeHtml(d.vpn_type || 'VPN ACTIVE')}</span>`
+        ? `<span class="badge vpn-badge" title="VPN/Proxy detected: ${escapeHTML(d.vpn_type || 'Active')}"><span class="vpn-dot"></span>${escapeHTML(d.vpn_type || 'VPN ACTIVE')}</span>`
         : "";
 
       tr.innerHTML = `
         <td>${statusHTML}</td>
         <td>
           <div class="device-name-wrap">
-            <strong>${escapeHtml(d.hostname)}</strong>
+            <strong>${escapeHTML(d.hostname)}</strong>
             ${vpnBadge}
           </div>
         </td>
-        <td class="mono">${escapeHtml(d.ip_address)}</td>
-        <td class="mono">${escapeHtml(d.mac_address) || "—"}</td>
-        <td class="mono">${timeAgo(d.last_seen)}</td>
+        <td class="mono">${escapeHTML(d.ip_address)}</td>
+        <td class="mono">${escapeHTML(d.mac_address || "—")}</td>
+        <td class="mono">${escapeHTML(timeAgo(d.last_seen))}</td>
         <td>
           <button class="device-toggle-btn ${d.is_blocked ? "is-blocked" : "is-allowed"}" data-id="${d.id}">
             ${d.is_blocked ? "Blocked" : "Allowed"}
@@ -133,7 +89,7 @@ async function loadDevices() {
         toggleBtn.textContent = isBlocked ? "Unblocking..." : "Blocking...";
 
         try {
-          showEnforcementWarnings(await fetchJSON(`/api/devices/${d.id}/${action}`, { method: "POST" }));
+          await fetchJSON(`/api/devices/${d.id}/${action}`, { method: "POST" });
           await refreshAll();
           // Update modal device if currently open
           if (currentModalDevice && currentModalDevice.id === d.id) {
@@ -174,12 +130,12 @@ async function loadBlocklist() {
     entries.forEach(e => {
       const li = document.createElement("li");
       li.innerHTML = `
-        <span class="entry-value">${escapeHtml(e.value)}</span>
+        <span class="entry-value">${escapeHTML(e.value)}</span>
         <button data-id="${e.id}" class="remove-btn">remove</button>
       `;
       li.querySelector(".remove-btn").onclick = async () => {
         try {
-          await fetch(`/api/blocklist/${e.id}`, { method: "DELETE" });
+          await fetchJSON(`/api/blocklist/${e.id}`, { method: "DELETE" });
           refreshAll();
         } catch (err) {
           console.error("Failed to remove rule:", err);
@@ -227,12 +183,12 @@ async function loadMostUsed() {
       li.className = "most-used-item";
       li.innerHTML = `
         <div class="most-used-info">
-          <span class="most-used-domain" title="${escapeHtml(item.domain)}">${escapeHtml(item.domain)}</span>
-          <span class="most-used-hits">${item.hits} request${item.hits === 1 ? '' : 's'}</span>
+          <span class="most-used-domain" title="${escapeHTML(item.domain)}">${escapeHTML(item.domain)}</span>
+        <span class="most-used-hits">${escapeHTML(item.hits)} request${item.hits === 1 ? '' : 's'}</span>
         </div>
         ${isBlocked
           ? `<span class="badge blocked">blocked</span>`
-          : `<button class="most-used-block-btn" data-domain="${escapeHtml(item.domain)}">Block</button>`}
+          : `<button class="most-used-block-btn" data-domain="${escapeHTML(item.domain)}">Block</button>`}
       `;
 
       const btn = li.querySelector(".most-used-block-btn");
@@ -281,7 +237,7 @@ async function loadAuditLog() {
       const li = document.createElement("li");
       li.className = "audit-item";
       li.innerHTML = `
-        <span class="audit-text">${escapeHtml(e.actor)} — ${escapeHtml(e.action)}</span>
+        <span class="audit-text">${escapeHTML(e.actor)} — ${escapeHTML(e.action)}</span>
         <span class="audit-time">${timeAgo(e.timestamp)}</span>
       `;
       list.appendChild(li);
@@ -312,7 +268,6 @@ function updateModalDeviceToggle(device) {
     modalToggleBtn.textContent = device.is_blocked ? "Unblocking..." : "Blocking...";
     try {
       const updated = await fetchJSON(`/api/devices/${device.id}/${action}`, { method: "POST" });
-      showEnforcementWarnings(updated);
       currentModalDevice = updated;
       updateModalDeviceToggle(updated);
       refreshAll();
@@ -326,100 +281,148 @@ function updateModalDeviceToggle(device) {
 }
 
 async function openHistoryModal(device) {
+  stopModalLive();
   currentModalDevice = device;
   const modal = document.getElementById("history-modal");
   const body = document.getElementById("history-modal-body");
   const title = document.getElementById("history-modal-title");
   const subtitle = document.getElementById("history-modal-subtitle");
 
-  title.textContent = `${device.hostname} — History`;
+  title.innerHTML = `${escapeHTML(device.hostname)} — History <span class="live-pill">&#9679; LIVE</span>`;
   subtitle.textContent = `IP: ${device.ip_address} | MAC: ${device.mac_address || "—"}`;
-  body.innerHTML = '<tr><td colspan="4" class="muted">loading…</td></tr>';
+  body.innerHTML = '<tr><td colspan="5" class="muted">loading…</td></tr>';
   modal.style.display = "flex";
-
   updateModalDeviceToggle(device);
 
-  try {
-    const [logs, activeBlocklist] = await Promise.all([
-      fetchJSON(`/api/activity?device_id=${device.id}&limit=100`),
-      fetchJSON("/api/blocklist")
-    ]);
+  let seenIds = new Set();
+  let activeBlocklist = [];
 
-    body.innerHTML = "";
-    if (logs.length === 0) {
-      body.innerHTML = '<tr><td colspan="4" class="muted">No activity for this device yet</td></tr>';
-      return;
-    }
+  async function fetchBlocklist() {
+    try { activeBlocklist = await fetchJSON("/api/blocklist"); } catch (_) {}
+  }
 
-    const blockedDomainValues = new Set(
+  function isDomainInBlocklist(domain) {
+    const blockedVals = new Set(
       activeBlocklist.filter(b => b.entry_type === "domain").map(b => b.value.toLowerCase())
     );
-
-    function isDomainInBlocklist(domain) {
-      const clean = domain.toLowerCase().replace(/^\.+|\.+$/g, "");
-      const parts = clean.split(".");
-      for (let i = 0; i < parts.length - 1; i++) {
-        const parent = parts.slice(i).join(".");
-        if (blockedDomainValues.has(parent)) return true;
-      }
-      return false;
+    const clean = domain.toLowerCase().replace(/^\.+|\.+$/g, "");
+    const parts = clean.split(".");
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (blockedVals.has(parts.slice(i).join("."))) return true;
     }
+    return false;
+  }
 
-    logs.forEach(log => {
-      const isAlreadyBlocked = log.status === "blocked" || isDomainInBlocklist(log.domain);
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td class="mono">${timeAgo(log.timestamp)}</td>
-        <td class="mono"><strong>${escapeHtml(log.domain)}</strong></td>
-        <td><span class="badge ${isAlreadyBlocked ? "blocked" : "allowed"}">${isAlreadyBlocked ? "blocked" : "allowed"}</span></td>
-        <td>
-          ${isAlreadyBlocked
-            ? `<span class="muted">already blocked</span>`
-            : `<button class="block-domain-btn" data-domain="${escapeHtml(log.domain)}">Block</button>`}
-        </td>
-      `;
+  function makeRow(log, isNew) {
+    const isAlreadyBlocked = log.status === "blocked" || isDomainInBlocklist(log.domain);
+    const tr = document.createElement("tr");
+    if (isNew) tr.classList.add("live-new-row");
+    tr.innerHTML = `
+      <td class="mono">${timeAgo(log.timestamp)}</td>
+      <td><strong>${escapeHTML(log.application || "Other/Unknown")}</strong></td>
+      <td class="mono"><strong>${escapeHTML(log.domain)}</strong></td>
+      <td><span class="badge ${isAlreadyBlocked ? "blocked" : "allowed"}">${isAlreadyBlocked ? "blocked" : "allowed"}</span></td>
+      <td>
+        ${isAlreadyBlocked
+          ? `<span class="muted">already blocked</span>`
+          : `<button class="block-domain-btn" data-domain="${escapeHTML(log.domain)}">Block</button>`}
+      </td>
+    `;
+    const blockBtn = tr.querySelector(".block-domain-btn");
+    if (blockBtn) {
+      blockBtn.onclick = async () => {
+        const domain = blockBtn.dataset.domain;
+        blockBtn.disabled = true;
+        blockBtn.textContent = "Blocking...";
+        try {
+          await fetchJSON("/api/blocklist", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ value: domain, entry_type: "domain", reason: `Blocked from ${device.hostname} history` })
+          });
+          refreshAll();
+          await fetchBlocklist();
+          // Re-render all rows to update their block status
+          openHistoryModal(device);
+        } catch (err) {
+          alert(`Failed to block ${domain}: ${err.message}`);
+          blockBtn.disabled = false;
+          blockBtn.textContent = "Block";
+        }
+      };
+    }
+    return tr;
+  }
 
-      const blockBtn = tr.querySelector(".block-domain-btn");
-      if (blockBtn) {
-        blockBtn.onclick = async () => {
-          const domain = blockBtn.dataset.domain;
-          blockBtn.disabled = true;
-          blockBtn.textContent = "Blocking...";
-          try {
-            await fetchJSON("/api/blocklist", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                value: domain,
-                entry_type: "domain",
-                reason: `Blocked from ${device.hostname} history`
-              })
-            });
-            refreshAll();
-            // Re-render history modal with updated block status
-            openHistoryModal(device);
-          } catch (err) {
-            alert(`Failed to block ${domain}: ${err.message}`);
-            blockBtn.disabled = false;
-            blockBtn.textContent = "Block";
-          }
-        };
-      }
-
-      body.appendChild(tr);
-    });
+  // Initial full load
+  try {
+    await fetchBlocklist();
+    const logs = await fetchJSON(`/api/activity?device_id=${device.id}&limit=100`);
+    body.innerHTML = "";
+    if (logs.length === 0) {
+      body.innerHTML = '<tr><td colspan="5" class="muted">No activity for this device yet</td></tr>';
+    } else {
+      logs.forEach(log => {
+        seenIds.add(log.id);
+        body.appendChild(makeRow(log, false));
+      });
+    }
   } catch (err) {
-    body.innerHTML = `<tr><td colspan="4" class="muted error">Failed to load history: ${err.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="muted error">Failed to load history: ${escapeHTML(err.message)}</td></tr>`;
+    return;
+  }
+
+  // Live polling: every 3 seconds fetch the latest 20 rows and prepend any new ones
+  _modalLiveInterval = setInterval(async () => {
+    if (!currentModalDevice || currentModalDevice.id !== device.id) {
+      stopModalLive();
+      return;
+    }
+    try {
+      await fetchBlocklist();
+      const fresh = await fetchJSON(`/api/activity?device_id=${device.id}&limit=20`);
+      const newRows = fresh.filter(log => !seenIds.has(log.id));
+      if (newRows.length > 0) {
+        // Remove placeholder if present
+        const placeholder = body.querySelector("td[colspan]");
+        if (placeholder) body.innerHTML = "";
+        newRows.forEach(log => {
+          seenIds.add(log.id);
+          const tr = makeRow(log, true);
+          body.insertBefore(tr, body.firstChild);
+          // Remove the flash class after animation
+          setTimeout(() => tr.classList.remove("live-new-row"), 1800);
+        });
+      }
+      // Refresh device block status in header if changed
+      const devices = await fetchJSON("/api/devices");
+      const updated = devices.find(d => d.id === device.id);
+      if (updated && updated.is_blocked !== currentModalDevice.is_blocked) {
+        currentModalDevice = updated;
+        updateModalDeviceToggle(updated);
+      }
+    } catch (_) {}
+  }, 3000);
+}
+
+let _modalLiveInterval = null;
+
+function stopModalLive() {
+  if (_modalLiveInterval) {
+    clearInterval(_modalLiveInterval);
+    _modalLiveInterval = null;
   }
 }
 
 document.getElementById("history-modal-close").onclick = () => {
+  stopModalLive();
   document.getElementById("history-modal").style.display = "none";
   currentModalDevice = null;
 };
 
 document.getElementById("history-modal").addEventListener("click", (e) => {
   if (e.target.id === "history-modal") {
+    stopModalLive();
     document.getElementById("history-modal").style.display = "none";
     currentModalDevice = null;
   }
@@ -437,12 +440,11 @@ document.getElementById("block-form").addEventListener("submit", async (e) => {
   submitBtn.textContent = "Blocking...";
 
   try {
-    const added = await fetchJSON("/api/blocklist", {
+    await fetchJSON("/api/blocklist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value, entry_type: "domain", reason: "Blocked from dashboard form" })
     });
-    showEnforcementWarnings(added);
     valueInput.value = "";
     refreshAll();
   } catch (err) {
@@ -453,15 +455,12 @@ document.getElementById("block-form").addEventListener("submit", async (e) => {
   }
 });
 
-let _fwTick = 0;
 function refreshAll() {
   loadStats();
   loadDevices();
   loadBlocklist();
   loadMostUsed();
   loadAuditLog();
-  // firewall health runs iptables + a DNS self-test, so check it every ~30s, not every 4s
-  if (_fwTick++ % 8 === 0) loadFirewallStatus();
 }
 
 // Initial load
@@ -508,4 +507,3 @@ if (profileBtn && profileDropdown) {
     });
   }
 }
-

@@ -763,6 +763,39 @@ body {
 .activity-table td { padding: 9px 10px; border-bottom: 1px solid #2a374c; vertical-align: middle; }
 .activity-table tr:hover td { background: #283447; }
 
+/* ---- Live history modal ---- */
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+  color: var(--green);
+  background: var(--green-dim);
+  border: 1px solid var(--green);
+  border-radius: 4px;
+  padding: 2px 7px;
+  vertical-align: middle;
+  margin-left: 8px;
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@keyframes row-flash-in {
+  0%   { background: rgba(16, 185, 129, 0.22); }
+  100% { background: transparent; }
+}
+
+.live-new-row td {
+  animation: row-flash-in 1.8s ease-out forwards;
+}
+
 @media (max-width: 900px) {
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .layout { grid-template-columns: 1fr; }

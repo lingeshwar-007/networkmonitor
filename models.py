@@ -57,6 +57,7 @@ class ActivityLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     device_id = db.Column(db.Integer, db.ForeignKey("devices.id"), nullable=False)
     domain = db.Column(db.String(255), nullable=False)
+    application_name = db.Column(db.String(100), nullable=True)
     resolved_ip = db.Column(db.String(45), nullable=True)
     status = db.Column(db.String(10), nullable=False, default="allowed")  # allowed | blocked
     timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
@@ -67,6 +68,7 @@ class ActivityLog(db.Model):
             "device_id": self.device_id,
             "device": self.device.nickname or self.device.ip_address,
             "domain": self.domain,
+            "application": self.application_name or "Other/Unknown",
             "resolved_ip": self.resolved_ip,
             "status": self.status,
             "timestamp": self.timestamp.isoformat(),
