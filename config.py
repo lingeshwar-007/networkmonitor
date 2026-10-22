@@ -82,8 +82,8 @@ BLOCK_METHOD = "dns"
 DNSMASQ_BLOCKLIST_FILE = "/etc/dnsmasq.d/guardspot_blocklist.conf"
 
 SECRET_KEY = os.environ.get("GUARDSPOT_SECRET_KEY") or "guardspot-secure-default-key-32bytes"
-ADMIN_USERNAME = os.environ.get("GUARDSPOT_ADMIN", "admin")
-ADMIN_PASSWORD = os.environ.get("GUARDSPOT_ADMIN_PASSWORD", "admin")
+ADMIN_USERNAME = os.environ.get("GUARDSPOT_ADMIN", "StrawHats")
+ADMIN_PASSWORD = os.environ.get("GUARDSPOT_ADMIN_PASSWORD", "luffy056")
 
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)

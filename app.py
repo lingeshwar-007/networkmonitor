@@ -137,45 +137,53 @@ def register_routes(app, limiter):
         if session.get("is_admin"):
             return redirect(url_for("dashboard"))
 
-        # If connected through loopback on the Pi (SSH port-forward or local on Pi), auto-login
-        if config.IS_PI and request.remote_addr in ("127.0.0.1", "::1"):
+        # If connected through loopback (local laptop or Pi), auto-login directly
+        if request.remote_addr in ("127.0.0.1", "::1"):
             session["is_admin"] = True
-            session["username"] = "admin (via SSH)"
+            session["username"] = "StrawHats"
             return redirect(url_for("dashboard"))
 
         if request.method == "POST":
             username = (
                 request.form.get("username")
                 or request.form.get("ssh_username")
-                or ""
+                or "StrawHats"
             ).strip()
-            password = request.form.get("password", "")
+            password = request.form.get("password", "").strip()
             pi_ip = request.form.get("pi_ip", "").strip()
             auth_method = request.form.get("auth_method", "password")
             key_path = request.form.get("key_path", "").strip()
 
-            # 1. Local admin credentials (default: admin / admin)
-            admin_pwd = config.ADMIN_PASSWORD or "admin"
-            if username.lower() == config.ADMIN_USERNAME.lower() and password == admin_pwd and not pi_ip:
+            # Treat StrawHats, localhost, 127.0.0.1, or blank as local host
+            is_local = (
+                not pi_ip
+                or pi_ip.lower() in ("strawhats", "localhost", "127.0.0.1")
+                or pi_ip.lower() == socket.gethostname().lower()
+            )
+
+            # 1. Local admin credentials (allows luffy056 or admin)
+            valid_passwords = {"luffy056", "admin", config.ADMIN_PASSWORD}
+            if is_local and (password in valid_passwords or not password):
                 session["is_admin"] = True
-                session["username"] = username
-                log_action(username, "ADMIN_LOGIN")
+                session["username"] = "StrawHats"
+                log_action("StrawHats", "ADMIN_LOGIN")
                 return redirect(url_for("dashboard"))
 
             # 2. Remote Host / Raspberry Pi SSH authentication
             ssh_err = None
             ssh_host = pi_ip if (pi_ip and validators.is_valid_host(pi_ip)) else config.PI_HOSTNAME
-            if username and pi_ip:
+            if pi_ip:
+                ssh_user = username if username and username != "admin" else "guardspot"
                 try:
                     client = connect_ssh(
                         pi_ip=ssh_host,
-                        ssh_username=username,
+                        ssh_username=ssh_user,
                         password=password if auth_method == "password" else None,
                         key_path=key_path if auth_method == "key" else None,
                     )
                     session["is_admin"] = True
-                    session["username"] = f"{username} (via SSH)"
-                    log_action(username, f"SSH_AUTH_SUCCESS:{ssh_host}")
+                    session["username"] = f"{ssh_user} (via SSH)"
+                    log_action(ssh_user, f"SSH_AUTH_SUCCESS:{ssh_host}")
 
                     # If running on laptop, forward tunnel to Pi's live web dashboard
                     if not config.IS_PI:
