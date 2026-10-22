@@ -373,6 +373,13 @@ def resolve_iface(value):
             return i
         if getattr(i, "name", None) == value:
             return i
+    # Windows Mobile Hotspot fallback: auto-detect Wi-Fi Direct adapter
+    if platform.system() == "Windows":
+        for i in conf.ifaces.values():
+            name = getattr(i, "name", "").lower()
+            desc = getattr(i, "description", "").lower()
+            if "wi-fi direct" in name or "wi-fi direct" in desc or "hotspot" in name:
+                return i
     return value
 
 

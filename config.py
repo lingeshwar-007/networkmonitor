@@ -95,13 +95,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
 AUTO_QUARANTINE_ON_BLOCKED_ACCESS = _env_bool("GUARDSPOT_AUTO_QUARANTINE", True)
 SESSION_COOKIE_SECURE = _env_bool("GUARDSPOT_SESSION_COOKIE_SECURE", False)
 
-# Bind address and port: 0.0.0.0 on Pi allows browser access via the Pi's IP; 127.0.0.1 on Windows
-HOST = os.environ.get("GUARDSPOT_HOST", "0.0.0.0" if IS_PI else "127.0.0.1")
+# Bind address: 0.0.0.0 allows browser access locally (localhost) and via hotspot IP
+HOST = os.environ.get("GUARDSPOT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("GUARDSPOT_PORT", 5000))
 
 # SSH connector settings (for remote control of Raspberry Pi)
 TUNNEL_LOCAL_PORT = int(os.environ.get("GUARDSPOT_FORWARD_PORT", 5050))
 PI_HOSTNAME = os.environ.get("GUARDSPOT_PI_HOST", "guardspot.local")
 REMOTE_PROJECT_DIR = os.environ.get("GUARDSPOT_REMOTE_DIR", "~/networkmonitor")
-# A Windows laptop should show the Pi dashboard, not start a sniffer on itself.
-LOCAL_CAPTURE = _env_bool("GUARDSPOT_LOCAL_CAPTURE", False)
+# Enable local sniffer by default on both Windows Mobile Hotspot and Raspberry Pi
+LOCAL_CAPTURE = _env_bool("GUARDSPOT_LOCAL_CAPTURE", True)
