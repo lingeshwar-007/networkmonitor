@@ -42,7 +42,7 @@ def _record_failed_attempt(ip: str):
 
 def create_app():
     if not config.SECRET_KEY:
-        raise RuntimeError("GUARDSPOT_SECRET_KEY must be set before starting GuardSpot")
+        config.SECRET_KEY = secrets.token_hex(32)
 
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = config.SQLALCHEMY_DATABASE_URI
@@ -154,17 +154,18 @@ def register_routes(app, limiter):
             auth_method = request.form.get("auth_method", "password")
             key_path = request.form.get("key_path", "").strip()
 
-            # 1. Configured admin credentials. A password must be explicitly configured.
-            if config.ADMIN_PASSWORD and username == config.ADMIN_USERNAME and password == config.ADMIN_PASSWORD:
+            # 1. Local admin credentials (default: admin / admin)
+            admin_pwd = config.ADMIN_PASSWORD or "admin"
+            if username.lower() == config.ADMIN_USERNAME.lower() and password == admin_pwd and not pi_ip:
                 session["is_admin"] = True
                 session["username"] = username
                 log_action(username, "ADMIN_LOGIN")
                 return redirect(url_for("dashboard"))
 
-            # 2. Raspberry Pi Linux / SSH authentication (e.g. guardspot / your-pi-password)
+            # 2. Remote Host / Raspberry Pi SSH authentication
             ssh_err = None
             ssh_host = pi_ip if (pi_ip and validators.is_valid_host(pi_ip)) else config.PI_HOSTNAME
-            if username:
+            if username and pi_ip:
                 try:
                     client = connect_ssh(
                         pi_ip=ssh_host,
@@ -194,11 +195,10 @@ def register_routes(app, limiter):
                 except Exception as e:
                     ssh_err = str(e)
 
-            err_msg = "Invalid credentials."
             if ssh_err:
-                err_msg = f"SSH to {ssh_host} failed: {ssh_err}."
+                err_msg = f"SSH connection to {ssh_host} failed: {ssh_err}. Check your Host IP and credentials."
             else:
-                err_msg = "Invalid credentials. Configure GUARDSPOT_ADMIN_PASSWORD or use your Raspberry Pi SSH credentials."
+                err_msg = "Invalid credentials. Use 'admin' / 'admin' for local dashboard, or enter Host IP and SSH credentials."
 
             return render_template(
                 "login.html",
@@ -421,17 +421,18 @@ def auto_start_sniffer():
 
     elif platform.system() == "Windows":
         try:
-            out = subprocess.check_output('wmic process where "commandline like \'%sniffer.py%\'" get processid', shell=True).decode(errors="ignore")
-            pids = [p.strip() for p in out.splitlines() if p.strip().isdigit()]
+            ps_cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"CommandLine LIKE \'%sniffer.py%\'\\" | Select-Object -ExpandProperty ProcessId"'
+            out = subprocess.check_output(ps_cmd, shell=True).decode(errors="ignore")
+            pids = [p.strip() for p in out.splitlines() if p.strip().isdigit() and int(p.strip()) != os.getpid()]
             if not pids:
-                subprocess.Popen([sys.executable, sniffer_path], creationflags=subprocess.CREATE_NO_WINDOW)
-                print("[GuardSpot] Background packet sniffer started on Windows.")
-        except Exception:
-            try:
-                subprocess.Popen([sys.executable, sniffer_path], creationflags=subprocess.CREATE_NO_WINDOW)
-                print("[GuardSpot] Background packet sniffer started on Windows.")
-            except Exception as e:
-                print(f"[GuardSpot] Notice: Could not auto-start sniffer: {e}")
+                log_path = os.path.join(base_dir, "sniffer.log")
+                log_fh = open(log_path, "a", buffering=1)
+                env = os.environ.copy()
+                env["PYTHONUNBUFFERED"] = "1"
+                subprocess.Popen([sys.executable, "-u", sniffer_path], stdout=log_fh, stderr=log_fh, env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+                print(f"[GuardSpot] Background packet sniffer started on Windows (logging to {log_path}).")
+        except Exception as e:
+            print(f"[GuardSpot] Notice: Could not auto-start sniffer on Windows: {e}")
 
 
 if __name__ == "__main__":

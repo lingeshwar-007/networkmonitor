@@ -1,18 +1,18 @@
 {% extends "base.html" %}
-{% block title %}GuardSpot — Connect{% endblock %}
+{% block title %}GuardSpot — Login{% endblock %}
 {% block body %}
 <div class="login-wrap">
   <form class="login-card" method="POST">
     <div class="login-mark">GS</div>
     <h1>GuardSpot</h1>
-    <p class="login-sub">Connect to your Raspberry Pi over SSH</p>
+    <p class="login-sub">Network Monitor & Gateway Firewall</p>
     {% if error %}<div class="login-error">{{ error }}</div>{% endif %}
 
-    <label>Raspberry Pi Hostname or IP</label>
-    <input type="text" name="pi_ip" value="{{ config_pi_host|default('guardspot.local') }}" placeholder="guardspot.local (or IP address)">
+    <label>Remote Host / Pi IP (Optional)</label>
+    <input type="text" name="pi_ip" placeholder="Leave blank for local hotspot, or enter Pi IP">
 
-    <label>SSH username</label>
-    <input type="text" name="ssh_username" value="guardspot" placeholder="guardspot" required>
+    <label>Username</label>
+    <input type="text" name="ssh_username" placeholder="admin (or Pi SSH user)" required>
 
     <div class="auth-toggle">
       <label><input type="radio" name="auth_method" value="password" checked onclick="toggleAuth('password')"> Password</label>
@@ -20,16 +20,16 @@
     </div>
 
     <div id="password-field">
-      <label>SSH password</label>
-      <input type="password" name="password">
+      <label>Password</label>
+      <input type="password" name="password" placeholder="admin (or Pi SSH password)" required>
     </div>
 
     <div id="key-field" style="display:none;">
       <label>Path to private key</label>
-      <input type="text" name="key_path" placeholder="/home/you/.ssh/id_rsa">
+      <input type="text" name="key_path" placeholder="C:\Users\You\.ssh\id_rsa">
     </div>
 
-    <button type="submit">Connect</button>
+    <button type="submit">Sign In / Connect</button>
   </form>
 </div>
 <script>

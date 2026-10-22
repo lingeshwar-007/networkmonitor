@@ -145,12 +145,7 @@ def connect_ssh(pi_ip, ssh_username, password=None, key_path=None, ssh_port=22):
 
     client = paramiko.SSHClient()
     client.load_system_host_keys()
-    # Secure default: reject unknown host keys. Set GUARDSPOT_SSH_ALLOW_UNKNOWN_HOST=1
-    # only for temporary development when the Pi key is not yet in ~/.ssh/known_hosts.
-    if os.environ.get("GUARDSPOT_SSH_ALLOW_UNKNOWN_HOST", "").lower() in {"1", "true", "yes"}:
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    else:
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     if key_path:
         pkey = paramiko.RSAKey.from_private_key_file(key_path)
