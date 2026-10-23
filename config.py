@@ -91,8 +91,27 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+# ---- Firewall behaviour (Raspberry Pi gateway) -------------------------------
+# Interface that connects the Pi to the internet (eth0, or wlan1 / usb0 ...).
+# None = auto-detect from the default route.
+UPLINK_INTERFACE = os.environ.get("GUARDSPOT_UPLINK") or None
+
+# Reject well-known DNS-over-HTTPS resolvers (1.1.1.1, 8.8.8.8, ...) so browsers
+# cannot bypass the DNS filter. DNS-over-TLS (port 853) is always rejected.
+BLOCK_PUBLIC_DOH = _env_bool("GUARDSPOT_BLOCK_DOH", True)
+
+# Match the site name inside HTTPS (SNI) / HTTP (Host) traffic so a blocked site is
+# refused even when the client already knows its IP address or uses its own DNS.
+SNI_FILTER = _env_bool("GUARDSPOT_SNI_FILTER", True)
+
+# While any website/app is blocked, reject QUIC (UDP/443) so browsers and apps fall
+# back to TCP where the SNI match works. Has no effect when nothing is blocked.
+BLOCK_QUIC = _env_bool("GUARDSPOT_BLOCK_QUIC", True)
+
 # Default to True: any device attempting to access blocked services is instantly isolated and kicked.
 AUTO_QUARANTINE_ON_BLOCKED_ACCESS = _env_bool("GUARDSPOT_AUTO_QUARANTINE", True)
+AUTO_QUARANTINE = AUTO_QUARANTINE_ON_BLOCKED_ACCESS
 SESSION_COOKIE_SECURE = _env_bool("GUARDSPOT_SESSION_COOKIE_SECURE", False)
 
 # Bind address: 0.0.0.0 allows browser access locally (localhost) and via hotspot IP
