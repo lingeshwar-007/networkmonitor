@@ -10,6 +10,7 @@ Enforces whole-device blocking and domain/app blocking via blocklist.py.
 from functools import wraps
 from datetime import datetime, timedelta
 import secrets
+import socket
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address

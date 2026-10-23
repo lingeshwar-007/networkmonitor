@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/guardspot/networkmonitor
-ExecStart=/home/pi/guardspot/venv/bin/python3 app.py
+User=root
+WorkingDirectory=/home/pi/networkmonitor
+ExecStart=/home/pi/networkmonitor/venv/bin/python3 app.py
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=-/etc/guardspot/guardspot.env

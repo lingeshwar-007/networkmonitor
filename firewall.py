@@ -57,6 +57,7 @@ from contextlib import contextmanager
 
 CHAIN = "GUARDSPOT"
 NAT_CHAIN = "GUARDSPOT_NAT"
+NAT6_CHAIN = "GUARDSPOT_NAT6"
 
 STATE_DIR = "/etc/guardspot"
 SERVERS_FILE = os.path.join(STATE_DIR, "blocked_domains.servers")
@@ -313,10 +314,14 @@ def _read(path):
 
 
 def _write_dns_rules(domains) -> bool:
-    """Write the dnsmasq servers-file. `server=/domain/` (no address) = answer
-    NXDOMAIN for the domain and every sub-domain, never forward it upstream."""
+    """Write a dnsmasq local-zone file that never forwards blocked domains.
+
+    ``local=/domain/`` makes dnsmasq authoritative for the zone and returns
+    NXDOMAIN/NODATA instead of forwarding the request upstream. This is more
+    portable than relying on empty ``server=/domain/`` behavior.
+    """
     content = "# Managed by GuardSpot - do not edit. Rebuilt from the database.\n"
-    content += "".join(f"server=/{d}/\n" for d in sorted(domains))
+    content += "".join(f"local=/{d}/\n" for d in sorted(domains))
     if _read(SERVERS_FILE) == content:
         return False
     _write_atomic(SERVERS_FILE, content)
@@ -494,6 +499,19 @@ def apply(*, dns_domains=(), sni_domains=None, cidrs=(), block_ips=(), macs=(), 
                             "so clients cannot be forced through GuardSpot's DNS filter.")
         except FirewallError as e:
             warn.append(str(e))
+        # IPv4 REDIRECT does not cover IPv6 clients. Keep IPv6 DNS requests
+        # on the gateway too, otherwise a dual-stack client can bypass the
+        # domain sinkhole with its own resolver.
+        try:
+            redirect6 = bool(iface) and local_dns_listening()
+            _ensure_chain(True, "nat", NAT6_CHAIN, ("PREROUTING",))
+            nat6_rules = []
+            if redirect6:
+                for proto in ("udp", "tcp"):
+                    nat6_rules.append(f"-A {NAT6_CHAIN} -i {iface} -p {proto} --dport 53 -j REDIRECT --to-ports 53")
+            _load_chain(True, "nat", NAT6_CHAIN, nat6_rules)
+        except FirewallError as e:
+            warn.append("IPv6 DNS redirect: " + str(e))
         for w in init_system(iface, uplink):
             warn.append(w)
 
@@ -585,6 +603,11 @@ def status(iface=None, uplink=None, expect_domains=(), sni_filter=True):
                            "-j", "REDIRECT", "--to-ports", "53"]).returncode == 0
         add("Client DNS forced to Pi", redirected, f"{iface}: port 53 redirected" if redirected else "",
             "Click 'Re-apply rules' (needs dnsmasq running)")
+        redirected6 = _cmd(["ip6tables", "-t", "nat", "-C", NAT6_CHAIN, "-i", iface, "-p", "udp", "--dport", "53",
+                            "-j", "REDIRECT", "--to-ports", "53"]).returncode == 0
+        add("IPv6 client DNS forced to Pi", redirected6,
+            f"{iface}: IPv6 port 53 redirected" if redirected6 else "",
+            "Click 'Re-apply rules' (needs dnsmasq and IPv6 NAT support)")
     up = uplink or default_uplink()
     if up:
         nat = _cmd(["iptables", "-t", "nat", "-C", "POSTROUTING", "-o", up, "-j", "MASQUERADE"]).returncode == 0
