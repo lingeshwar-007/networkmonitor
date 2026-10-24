@@ -447,6 +447,20 @@ body {
   background: #64748b;
 }
 
+.status-pill.blocked {
+  color: var(--red);
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+}
+
+.status-pill.blocked .dot {
+  background: var(--red);
+}
+
+.device-blocked-row td {
+  background: rgba(239, 68, 68, 0.06);
+}
+
 /* Solid, High-Visibility Buttons */
 .device-toggle-btn {
   border: 1px solid var(--line-light);
@@ -651,6 +665,24 @@ body {
   background: var(--red-dim);
   color: var(--red);
   border: 1px solid var(--red);
+}
+
+.badge.device {
+  background: var(--red-dim);
+  color: var(--red);
+  border: 1px solid var(--red);
+}
+
+.badge.domain {
+  background: rgba(6, 182, 212, 0.15);
+  color: var(--cyan);
+  border: 1px solid var(--cyan);
+}
+
+.badge.ip {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid #a855f7;
 }
 
 /* ---- VPN Detection Badge (Solid, No Glow Pulse) ---- */

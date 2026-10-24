@@ -324,17 +324,48 @@ def register_routes(app, limiter):
             log_action(session.get("username", "admin"), f"BLOCK_WEBSITE:{value}")
             return jsonify(entry.to_dict()), 201
 
-        entries = BlockedEntry.query.order_by(BlockedEntry.added_at.desc()).all()
-        return jsonify([e.to_dict() for e in entries])
+        entries = [e.to_dict() for e in BlockedEntry.query.order_by(BlockedEntry.added_at.desc()).all()]
+        blocked_devices = Device.query.filter_by(is_blocked=True).all()
+        for d in blocked_devices:
+            dev_label = d.nickname or d.ip_address
+            entries.append({
+                "id": f"dev-{d.id}",
+                "device_id": d.id,
+                "entry_type": "device",
+                "value": f"{dev_label} ({d.ip_address})",
+                "mac_address": d.mac_address,
+                "ip_address": d.ip_address,
+                "reason": "Blocked Device",
+                "added_at": d.last_seen.isoformat() if d.last_seen else None,
+            })
+        return jsonify(entries)
 
-    @app.route("/api/blocklist/<int:entry_id>", methods=["DELETE"])
+    @app.route("/api/blocklist/<entry_id>", methods=["DELETE"])
     @login_required
     def api_blocklist_delete(entry_id):
-        entry = BlockedEntry.query.get(entry_id)
-        value = entry.value if entry else str(entry_id)
-        blocklist_module.remove_block(entry_id, db=db)
-        log_action(session.get("username", "admin"), f"UNBLOCK_WEBSITE:{value}")
-        return jsonify({"success": True})
+        entry_str = str(entry_id)
+        if entry_str.startswith("dev-"):
+            try:
+                dev_id = int(entry_str.replace("dev-", ""))
+                device = Device.query.get_or_404(dev_id)
+                device.is_blocked = False
+                db.session.commit()
+                blocklist_module.unblock_device(device.ip_address, device.mac_address)
+                dev_label = device.nickname or device.mac_address or device.ip_address
+                log_action(session.get("username", "admin"), f"UNBLOCK_DEVICE:{dev_label} ({device.ip_address})")
+                return jsonify({"success": True})
+            except Exception as e:
+                return jsonify({"error": str(e)}), 400
+
+        try:
+            numeric_id = int(entry_str)
+            entry = BlockedEntry.query.get(numeric_id)
+            value = entry.value if entry else str(numeric_id)
+            blocklist_module.remove_block(numeric_id, db=db)
+            log_action(session.get("username", "admin"), f"UNBLOCK_WEBSITE:{value}")
+            return jsonify({"success": True})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
 
     @app.route("/api/most-used")
     @login_required
@@ -365,10 +396,11 @@ def register_routes(app, limiter):
         db.session.expire_all()
         devices = Device.query.all()
         connected_now = sum(1 for d in devices if d.to_dict()["connected"])
+        blocked_devices_count = sum(1 for d in devices if d.is_blocked)
         return jsonify({
             "known_devices": len(devices),
             "connected_now": connected_now,
-            "active_block_rules": BlockedEntry.query.count(),
+            "active_block_rules": BlockedEntry.query.count() + blocked_devices_count,
             "blocked_requests": ActivityLog.query.filter_by(status="blocked").count(),
         })
 

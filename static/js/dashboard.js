@@ -51,8 +51,13 @@ async function loadDevices() {
 
     devices.forEach(d => {
       const tr = document.createElement("tr");
+      if (d.is_blocked) {
+        tr.classList.add("device-blocked-row");
+      }
 
-      const statusHTML = d.connected
+      const statusHTML = d.is_blocked
+        ? `<span class="status-pill blocked"><span class="dot"></span>Blocked</span>`
+        : d.connected
         ? `<span class="status-pill connected"><span class="dot"></span>Online</span>`
         : `<span class="status-pill disconnected"><span class="dot"></span>Offline</span>`;
 
@@ -129,13 +134,21 @@ async function loadBlocklist() {
 
     entries.forEach(e => {
       const li = document.createElement("li");
+      const isDevice = e.entry_type === "device";
       li.innerHTML = `
-        <span class="entry-value">${escapeHTML(e.value)}</span>
-        <button data-id="${e.id}" class="remove-btn">remove</button>
+        <div style="display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden;">
+          <span class="badge ${escapeHTML(e.entry_type)}">${escapeHTML(e.entry_type)}</span>
+          <span class="entry-value" title="${escapeHTML(e.value)}">${escapeHTML(e.value)}</span>
+        </div>
+        <button data-id="${e.id}" class="remove-btn" title="Unblock ${escapeHTML(e.value)}">${isDevice ? "unblock" : "remove"}</button>
       `;
       li.querySelector(".remove-btn").onclick = async () => {
         try {
-          await fetchJSON(`/api/blocklist/${e.id}`, { method: "DELETE" });
+          if (isDevice && e.device_id) {
+            await fetchJSON(`/api/devices/${e.device_id}/unblock`, { method: "POST" });
+          } else {
+            await fetchJSON(`/api/blocklist/${e.id}`, { method: "DELETE" });
+          }
           refreshAll();
         } catch (err) {
           console.error("Failed to remove rule:", err);
