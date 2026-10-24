@@ -297,19 +297,26 @@ def _load_chain(v6, table, chain, lines):
 # ----------------------------------------------------------------- DNS side
 
 def _write_atomic(path, content):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(content)
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, path)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except (PermissionError, OSError):
+        _cmd(["mkdir", "-p", os.path.dirname(path)])
+        _cmd(["tee", path], stdin=content)
 
 
 def _read(path):
     try:
         with open(path) as f:
             return f.read()
-    except OSError:
+    except (PermissionError, OSError):
+        r = _cmd(["cat", path])
+        if r.returncode == 0:
+            return r.stdout
         return None
 
 
